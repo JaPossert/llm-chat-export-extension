@@ -53,12 +53,9 @@ async function handleExport(message, sendResponse) {
     }
 
     try {
-        // Inject the content processor first, then the extractor
-        await chrome.scripting.executeScript({
-            target: { tabId: tabId },
-            files: ['utils/content-processor.js', `extractors/${platform}-extractor.js`],
-        });
-        console.log(`Successfully injected content-processor.js and ${platform}-extractor.js`);
+        // Inject scripts only when they are not already present on this page.
+        await ensureExportScriptsInjected(tabId, platform);
+        console.log(`Export scripts are ready for ${platform}.`);
 
         // Send a message to the content script to start the extraction
         const response = await chrome.tabs.sendMessage(tabId, {
@@ -69,14 +66,25 @@ async function handleExport(message, sendResponse) {
         console.log('Received response from content script:', response);
 
         if (response && response.success) {
-            // Download the file using offscreen document approach
-            try {
-                await downloadFileWithOffscreen(response.filename, response.content, format);
+            // New fast path: content script already handled the file download.
+            if (response.downloaded) {
                 sendResponse({ success: true });
-            } catch (downloadError) {
-                console.error('Download failed:', downloadError);
-                sendResponse({ success: false, error: 'Download failed: ' + downloadError.message });
+                return;
             }
+
+            // Backward-compatible path: download from background/offscreen.
+            if (typeof response.content === 'string' && response.content.length > 0) {
+                try {
+                    await downloadFileWithOffscreen(response.filename, response.content, format);
+                    sendResponse({ success: true });
+                } catch (downloadError) {
+                    console.error('Download failed:', downloadError);
+                    sendResponse({ success: false, error: 'Download failed: ' + downloadError.message });
+                }
+                return;
+            }
+
+            throw new Error('Extractor returned success without downloadable content.');
         } else {
             throw new Error(response.error || 'Extraction failed in content script.');
         }
@@ -84,6 +92,58 @@ async function handleExport(message, sendResponse) {
         console.error('Error during script injection or execution:', error);
         sendResponse({ success: false, error: `Failed to communicate with the page. Please refresh the tab and try again. Details: ${error.message}` });
     }
+}
+
+async function ensureExportScriptsInjected(tabId, platform) {
+    const markerByPlatform = {
+        chatgpt: 'chatGPT_extractor_injected',
+        claude: 'claude_extractor_injected',
+        gemini: 'gemini_extractor_injected',
+        grok: 'grok_extractor_injected'
+    };
+
+    const extractorMarker = markerByPlatform[platform];
+    if (!extractorMarker) {
+        throw new Error(`Unknown platform marker: ${platform}`);
+    }
+
+    let state = { hasProcessor: false, hasExtractor: false };
+
+    try {
+        const results = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: (markerName) => {
+                return {
+                    hasProcessor: typeof window.ContentProcessor !== 'undefined',
+                    hasExtractor: Boolean(window[markerName])
+                };
+            },
+            args: [extractorMarker]
+        });
+
+        if (results && results[0] && results[0].result) {
+            state = results[0].result;
+        }
+    } catch (error) {
+        console.warn('Could not check injected script state, falling back to fresh injection:', error);
+    }
+
+    const filesToInject = [];
+    if (!state.hasProcessor) {
+        filesToInject.push('utils/content-processor.js');
+    }
+    if (!state.hasExtractor) {
+        filesToInject.push(`extractors/${platform}-extractor.js`);
+    }
+
+    if (filesToInject.length === 0) {
+        return;
+    }
+
+    await chrome.scripting.executeScript({
+        target: { tabId },
+        files: filesToInject
+    });
 }
 
 // Modern approach using offscreen document for blob handling

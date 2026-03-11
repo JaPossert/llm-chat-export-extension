@@ -1,0 +1,3040 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.gitignore
+background.js
+extractors/chatgpt-extractor.js
+extractors/claude-extractor.js
+extractors/gemini-extractor.js
+extractors/grok-extractor.js
+icons/icon-128.png
+icons/icon-16.png
+icons/icon-32.png
+icons/icon-48.png
+icons/image_1280x800.png
+LICENSE
+manifest.json
+offscreen.html
+offscreen.js
+popup.css
+popup.html
+popup.js
+PRIVACY_POLICY.md
+README.md
+STORE_LISTING.md
+utils/content-processor.js
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".gitignore">
+./repomix-output.xml
+</file>
+
+<file path="background.js">
+// Universal LLM Conversation Exporter - Service Worker (Corrected)
+
+console.log('Service worker starting...');
+
+// Listen for messages from the popup script
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    // SECURITY FIX: Enhanced message origin validation
+    if (sender.id !== chrome.runtime.id || !message.action) {
+        console.warn('Rejected message from invalid sender:', sender);
+        return;
+    }
+
+    // Additional validation for tab-based messages
+    if (message.action === 'exportConversation' && sender.tab) {
+        if (!isValidUrl(sender.tab.url)) {
+            console.warn('Rejected message from invalid tab URL:', sender.tab.url);
+            sendResponse({ success: false, error: 'Invalid tab URL.' });
+            return;
+        }
+    }
+
+    if (message.action === 'exportConversation') {
+        handleExport(message, sendResponse);
+    }
+
+    // Return true to indicate you wish to send a response asynchronously
+    return true;
+});
+
+async function handleExport(message, sendResponse) {
+    const { format, tabId, platform } = message;
+
+    console.log(`Received export request for platform: ${platform}, format: ${format}`);
+
+    if (!tabId) {
+        console.error('Export failed: No active tab ID provided.');
+        sendResponse({ success: false, error: 'No active tab found.' });
+        return;
+    }
+
+    // SECURITY FIX: Validate platform parameter to prevent path traversal
+    if (!isValidPlatform(platform)) {
+        console.error('Export failed: Invalid platform specified:', platform);
+        sendResponse({ success: false, error: 'Invalid platform specified.' });
+        return;
+    }
+
+    // SECURITY FIX: Validate format parameter
+    if (!isValidFormat(format)) {
+        console.error('Export failed: Invalid format specified:', format);
+        sendResponse({ success: false, error: 'Invalid format specified.' });
+        return;
+    }
+
+    try {
+        // Inject scripts only when they are not already present on this page.
+        await ensureExportScriptsInjected(tabId, platform);
+        console.log(`Export scripts are ready for ${platform}.`);
+
+        // Send a message to the content script to start the extraction
+        const response = await chrome.tabs.sendMessage(tabId, {
+            action: 'extractConversation',
+            format: format,
+        });
+
+        console.log('Received response from content script:', response);
+
+        if (response && response.success) {
+            // New fast path: content script already handled the file download.
+            if (response.downloaded) {
+                sendResponse({ success: true });
+                return;
+            }
+
+            // Backward-compatible path: download from background/offscreen.
+            if (typeof response.content === 'string' && response.content.length > 0) {
+                try {
+                    await downloadFileWithOffscreen(response.filename, response.content, format);
+                    sendResponse({ success: true });
+                } catch (downloadError) {
+                    console.error('Download failed:', downloadError);
+                    sendResponse({ success: false, error: 'Download failed: ' + downloadError.message });
+                }
+                return;
+            }
+
+            throw new Error('Extractor returned success without downloadable content.');
+        } else {
+            throw new Error(response.error || 'Extraction failed in content script.');
+        }
+    } catch (error) {
+        console.error('Error during script injection or execution:', error);
+        sendResponse({ success: false, error: `Failed to communicate with the page. Please refresh the tab and try again. Details: ${error.message}` });
+    }
+}
+
+async function ensureExportScriptsInjected(tabId, platform) {
+    const markerByPlatform = {
+        chatgpt: 'chatGPT_extractor_injected',
+        claude: 'claude_extractor_injected',
+        gemini: 'gemini_extractor_injected',
+        grok: 'grok_extractor_injected'
+    };
+
+    const extractorMarker = markerByPlatform[platform];
+    if (!extractorMarker) {
+        throw new Error(`Unknown platform marker: ${platform}`);
+    }
+
+    let state = { hasProcessor: false, hasExtractor: false };
+
+    try {
+        const results = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: (markerName) => {
+                return {
+                    hasProcessor: typeof window.ContentProcessor !== 'undefined',
+                    hasExtractor: Boolean(window[markerName])
+                };
+            },
+            args: [extractorMarker]
+        });
+
+        if (results && results[0] && results[0].result) {
+            state = results[0].result;
+        }
+    } catch (error) {
+        console.warn('Could not check injected script state, falling back to fresh injection:', error);
+    }
+
+    const filesToInject = [];
+    if (!state.hasProcessor) {
+        filesToInject.push('utils/content-processor.js');
+    }
+    if (!state.hasExtractor) {
+        filesToInject.push(`extractors/${platform}-extractor.js`);
+    }
+
+    if (filesToInject.length === 0) {
+        return;
+    }
+
+    await chrome.scripting.executeScript({
+        target: { tabId },
+        files: filesToInject
+    });
+}
+
+// Modern approach using offscreen document for blob handling
+async function downloadFileWithOffscreen(filename, content, format) {
+    const mimeTypes = {
+        'markdown': 'text/markdown',
+        'text': 'text/plain',
+        'json': 'application/json',
+    };
+    const mimeType = mimeTypes[format] || 'text/plain';
+
+    try {
+        // Create offscreen document if it doesn't exist
+        await ensureOffscreenDocument();
+
+        // Send content to offscreen document to create blob URL
+        const response = await chrome.runtime.sendMessage({
+            action: 'createDownloadUrl',
+            content: content,
+            mimeType: mimeType
+        });
+
+        if (!response.success) {
+            throw new Error(response.error || 'Failed to create download URL');
+        }
+
+        // Use the blob URL for download
+        return new Promise((resolve, reject) => {
+            chrome.downloads.download({
+                url: response.url,
+                filename: filename,
+                saveAs: false,
+            }, (downloadId) => {
+                if (chrome.runtime.lastError) {
+                    console.error('Download failed:', chrome.runtime.lastError.message);
+                    reject(new Error(chrome.runtime.lastError.message));
+                } else {
+                    console.log(`Download started with ID: ${downloadId}`);
+                    resolve(downloadId);
+                }
+            });
+        });
+
+    } catch (error) {
+        console.error('Error in downloadFileWithOffscreen:', error);
+        throw error;
+    }
+}
+
+// Ensure offscreen document exists
+async function ensureOffscreenDocument() {
+    try {
+        // Check if offscreen document already exists
+        const existingContexts = await chrome.runtime.getContexts({
+            contextTypes: ['OFFSCREEN_DOCUMENT'],
+            documentUrls: [chrome.runtime.getURL('offscreen.html')]
+        });
+
+        if (existingContexts.length > 0) {
+            return; // Already exists
+        }
+
+        // Create offscreen document
+        await chrome.offscreen.createDocument({
+            url: chrome.runtime.getURL('offscreen.html'),
+            reasons: ['BLOBS'],
+            justification: 'Create blob URLs for file downloads in Manifest V3'
+        });
+
+        console.log('Offscreen document created');
+    } catch (error) {
+        console.error('Error creating offscreen document:', error);
+        throw error;
+    }
+}
+
+// SECURITY: Input validation functions
+function isValidPlatform(platform) {
+    const validPlatforms = ['chatgpt', 'claude', 'gemini', 'grok'];
+    return typeof platform === 'string' && validPlatforms.includes(platform);
+}
+
+function isValidFormat(format) {
+    const validFormats = ['text', 'markdown', 'json'];
+    return typeof format === 'string' && validFormats.includes(format);
+}
+
+function isValidUrl(url) {
+    if (typeof url !== 'string') return false;
+
+    try {
+        const urlObj = new URL(url);
+        // Only allow https and http protocols
+        if (!['https:', 'http:'].includes(urlObj.protocol)) {
+            return false;
+        }
+
+        // Check against allowed domains
+        const allowedDomains = [
+            'chat.openai.com',
+            'chatgpt.com',
+            'claude.ai',
+            'gemini.google.com',
+            'x.com',
+            'grok.com'
+        ];
+
+        return allowedDomains.some(domain =>
+            urlObj.hostname === domain || urlObj.hostname.endsWith('.' + domain)
+        );
+    } catch {
+        return false;
+    }
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+    console.log('Universal LLM Conversation Exporter installed/updated.');
+});
+</file>
+
+<file path="extractors/chatgpt-extractor.js">
+// Universal LLM Conversation Exporter - ChatGPT Extractor (Simplified and More Robust)
+
+class ChatGPTExtractor {
+    constructor() {
+        this.selectors = {
+            // Just get all article elements - much simpler
+            conversationTurn: 'article',
+            authorRoleElement: '[data-message-author-role]',
+            // Keep UI elements removal for cleaner text
+            uiElementsToRemove: '[data-testid="copy-turn-action-button"], [aria-label="Edit message"], [aria-label="More actions"], button, .sr-only',
+        };
+    }
+
+    /**
+     * Entry point for extraction.
+     */
+    async extractConversation() {
+        console.log('ChatGPTExtractor: Starting simple article text extraction...');
+        const messages = [];
+        const articles = document.querySelectorAll(this.selectors.conversationTurn);
+
+        if (articles.length === 0) {
+            console.error('No articles found on page');
+            throw new Error('No conversation articles found. Make sure you are on a ChatGPT conversation page.');
+        }
+
+        console.log(`Found ${articles.length} articles.`);
+
+        for (let index = 0; index < articles.length; index++) {
+            const article = articles[index];
+            try {
+                const message = this.extractMessageFromArticle(article);
+                if (message) {
+                    messages.push(message);
+                }
+            } catch (error) {
+                console.warn('Could not extract message from article:', error);
+            }
+
+            // Yield periodically so very large chats don't block the tab for too long.
+            if ((index + 1) % 25 === 0) {
+                await this.yieldToMainThread();
+            }
+        }
+
+        console.log(`Successfully extracted ${messages.length} messages.`);
+        return messages;
+    }
+
+    yieldToMainThread() {
+        return new Promise(resolve => setTimeout(resolve, 0));
+    }
+
+    /**
+     * Extracts a single message object from an article element.
+     * Simplified approach - just get all text from the article.
+     */
+    extractMessageFromArticle(articleElement) {
+        // 1. Try to find the role element to determine if this is user or assistant
+        const roleElement = articleElement.querySelector(this.selectors.authorRoleElement);
+        let role = 'unknown';
+
+        if (roleElement) {
+            role = roleElement.getAttribute('data-message-author-role') || 'unknown';
+        } else {
+            // Fallback: try to determine role from content or position
+            const text = articleElement.innerText || '';
+            if (text.toLowerCase().includes('you said:') || text.toLowerCase().includes('you:')) {
+                role = 'user';
+            } else if (text.toLowerCase().includes('chatgpt said:') || text.toLowerCase().includes('chatgpt:')) {
+                role = 'assistant';
+            }
+        }
+
+        // 2. Prefer the role container when present to reduce copied DOM size.
+        const contentRoot = roleElement ? roleElement : articleElement;
+        const articleClone = contentRoot.cloneNode(true);
+
+        // 3. Remove UI elements for cleaner text
+        const uiElements = articleClone.querySelectorAll(this.selectors.uiElementsToRemove);
+        uiElements.forEach(el => el.remove());
+
+        // 4. Extract plain text for fast processing and lower memory footprint.
+        let content = '';
+        try {
+            content = articleClone.innerText || articleClone.textContent || '';
+        } catch (error) {
+            content = articleClone.textContent || '';
+        }
+
+        if (content.trim().length === 0) {
+            return null; // Skip empty articles
+        }
+
+        return {
+            role: role,
+            content: content.trim(),
+            isPlainText: true
+        };
+    }
+}
+
+/**
+ * Main execution logic for the content script.
+ * Listens for the message from the background script to start extraction.
+ */
+if (typeof window.chatGPT_extractor_injected === 'undefined') {
+    window.chatGPT_extractor_injected = true;
+
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+        if (message.action === 'extractConversation') {
+            (async () => {
+                try {
+                    const extractor = new ChatGPTExtractor();
+                    const conversationData = await extractor.extractConversation();
+
+                    if (conversationData && conversationData.length > 0) {
+                        // Generate filename: first_ten_chars_of_url_datetime_with_underscores
+                        const url = window.location.href;
+                        const urlStart = url.replace(/^https?:\/\//, '').substring(0, 10).replace(/[^a-z0-9]/gi, '_');
+                        const now = new Date();
+                        const datetime = now.toISOString().replace(/[-:T]/g, '_').split('.')[0]; // YYYY_MM_DD_HH_MM_SS
+                        const filename = `${urlStart}_${datetime}.txt`;
+
+                        // Use chunked export to avoid creating one massive output file.
+                        const contentProcessor = new window.ContentProcessor();
+                        const exportResult = await contentProcessor.downloadConversationInChunks(
+                            conversationData,
+                            {
+                                includeTimestamps: false,
+                                includeMetadata: true,
+                                platform: 'ChatGPT',
+                                url: url
+                            },
+                            {
+                                filename,
+                                mimeType: 'text/plain;charset=utf-8',
+                                maxChunkChars: 600000,
+                                delayMs: 120
+                            }
+                        );
+
+                        if (!exportResult.success) {
+                            throw new Error(exportResult.error || 'Failed to start download.');
+                        }
+
+                        if (exportResult.parts > 1) {
+                            console.log(`ChatGPT export split into ${exportResult.parts} files.`);
+                        }
+
+                        sendResponse({
+                            success: true,
+                            downloaded: true,
+                            filename,
+                            partCount: exportResult.parts
+                        });
+                    } else {
+                        throw new Error('No valid messages were extracted from the page.');
+                    }
+                } catch (error) {
+                    console.error('Extraction failed in content script:', error);
+                    sendResponse({ success: false, error: error.message });
+                }
+            })();
+        }
+        return true; // Keep message channel open for async response.
+    });
+}
+</file>
+
+<file path="extractors/claude-extractor.js">
+// Universal LLM Conversation Exporter - Claude Extractor (Simple and Direct)
+
+class ClaudeExtractor {
+  constructor() {
+    // Use the correct approach based on user feedback
+    this.selectors = {
+      // Main container selector
+      chatContainer: "div.flex-1.flex.flex-col.gap-3.px-4",
+      titleElement: "button[data-testid='chat-menu-trigger']",
+      // Claude still uses font-claude-response, and we need to look for standard-markdown content
+      messageElements: "div.font-claude-response, div.font-user-message, [data-testid='user-message']",
+      // Key insight: Claude messages are in elements containing "standard-markdown"
+      claudeContentSelector: '[class*="standard-markdown"]'
+    };
+  }
+
+  // Test method to run extraction and log results without full extension
+  testExtraction() {
+    console.log('=== Claude Extractor Test ===');
+    const { elements, title, centralContainer } = this.getContents();
+    console.log(`Title: ${title}`);
+    console.log(`Central container found: ${centralContainer ? 'Yes' : 'No'}`);
+    console.log(`Elements found: ${elements.length}`);
+
+    elements.forEach((el, i) => {
+      const text = el.textContent?.trim();
+      const preview = text ? text.substring(0, 100) + (text.length > 100 ? '...' : '') : 'No text';
+      console.log(`Element ${i}: ${el.className} - ${preview}`);
+    });
+
+    return { elements, title, centralContainer };
+  }
+
+  getTimestamp() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const hours = String(now.getHours()).padStart(2, '0');
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const seconds = String(now.getSeconds()).padStart(2, '0');
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+  }
+
+  getContents() {
+    const titleEle = document.querySelector(this.selectors.titleElement);
+    const titleText = titleEle ? titleEle.textContent.trim() : "Claude Chat";
+
+    // Get the chat container and find all message elements in order
+    let elements = [];
+    let chatContainer = null;
+
+    try {
+      chatContainer = document.querySelector(this.selectors.chatContainer);
+      console.log('Chat container found:', chatContainer);
+
+      if (chatContainer) {
+        // Get all potential message elements in document order (top to bottom)
+        elements = chatContainer.querySelectorAll(this.selectors.messageElements);
+        console.log(`Found ${elements.length} elements in chat container with selectors: ${this.selectors.messageElements}`);
+      }
+    } catch (error) {
+      console.log('Chat container approach failed:', error);
+    }
+
+    // Fallback to document-wide search if chat container method fails
+    if (elements.length === 0) {
+      console.log('Falling back to document-wide selector approach');
+      elements = document.querySelectorAll(this.selectors.messageElements);
+      console.log(`Found ${elements.length} total elements with selectors: ${this.selectors.messageElements}`);
+    }
+
+    return {
+      elements: Array.from(elements),
+      title: titleText,
+      chatContainer: chatContainer
+    };
+  }
+
+  consoleSave(data, title) {
+    let filename = title ?
+      title.trim()
+        .toLowerCase()
+        .replace(/[<>:"/\\|?*]/g, '_')
+        .replace(/\s+/g, '-')
+        .replace(/^[^\w\d]+|[^\w\d]+$/g, '')
+        .substring(0, 100) || "claude"
+      : "claude";
+
+    filename += ".md";
+    const mimeType = "text/markdown";
+
+    const blob = new Blob([data], { type: mimeType });
+    const a = document.createElement("a");
+    a.download = filename;
+    a.href = window.URL.createObjectURL(blob);
+
+    const event = new MouseEvent("click", {
+      canBubble: true,
+      cancelable: false,
+      view: window,
+      detail: 0,
+      screenX: 0,
+      screenY: 0,
+      clientX: 0,
+      clientY: 0,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      metaKey: false,
+      button: 0,
+      relatedTarget: null,
+    });
+
+    a.dispatchEvent(event);
+
+    setTimeout(() => {
+      window.URL.revokeObjectURL(a.href);
+    }, 1000);
+  }
+
+  // Main extraction method
+  async extractConversation() {
+    console.log('ClaudeExtractor: Starting extraction with proven working approach...');
+
+    let markdown = "";
+    const { elements, title, chatContainer } = this.getContents();
+
+    console.log(`Using chat container: ${chatContainer ? 'Yes' : 'No'}`);
+    console.log(`Found ${elements.length} message elements`);
+
+    const timestamp = this.getTimestamp();
+    markdown += `# ${title}\n\`${timestamp}\`\n\n`;
+
+    for (let i = 0; i < elements.length; i++) {
+      const ele = elements[i];
+      const elementText = (ele.textContent || '').trim();
+      const preview = elementText.substring(0, 50).replace(/\n/g, ' ') + (elementText.length > 50 ? '...' : '');
+
+      console.log(`Processing element ${i}: ${ele.className}`);
+      console.log(`  Text preview: "${preview}"`);
+
+      // Skip thinking sections (collapsible elements with specific structure)
+      if (this.isThinkingSection(ele)) {
+        console.log(`   SKIPPING thinking section ${i}: "${preview}"`);
+        continue;
+      }
+
+      // Handle Claude responses - look for standard-markdown content
+      if (ele.classList.contains("font-claude-response")) {
+        console.log(`   PROCESSING Claude response ${i}: "${preview}"`);
+        markdown += `_Claude_:\n`;
+
+        // Look for standard-markdown content as suggested by user
+        const standardMarkdownElements = ele.querySelectorAll(this.selectors.claudeContentSelector);
+        console.log(`   Found ${standardMarkdownElements.length} standard-markdown elements`);
+
+        if (standardMarkdownElements.length > 0) {
+          // Process all standard-markdown elements in order
+          for (const markdownEl of standardMarkdownElements) {
+            const extractedContent = this.processChildNodes(markdownEl.childNodes);
+            markdown += extractedContent;
+            console.log(`   Extracted ${extractedContent.length} characters from standard-markdown element`);
+          }
+        } else {
+          console.log(`   No standard-markdown elements found, using fallback`);
+          // Fallback to original approach
+          const firstChild = ele.firstChild;
+          if (firstChild && firstChild.nodeType === Node.ELEMENT_NODE) {
+            let secondChild = firstChild.firstChild;
+            if (!secondChild) secondChild = firstChild;
+            const extractedContent = this.processChildNodes(secondChild.childNodes);
+            markdown += extractedContent;
+            console.log(`   Extracted ${extractedContent.length} characters from Claude response (fallback)`);
+          }
+        }
+      }
+      // Handle user messages
+      else {
+        console.log(`   PROCESSING User message ${i}: "${preview}"`);
+        markdown += `_Human_:\n`;
+
+        // Check for attachments first
+        const attachmentContent = this.processUserAttachments(ele);
+        if (attachmentContent) {
+          console.log(`   Found user attachments: "${attachmentContent.trim()}"`);
+          markdown += attachmentContent;
+        }
+
+        // Then process text content
+        const textContent = this.processChildNodes(ele.childNodes);
+        if (textContent.trim()) {
+          const textPreview = textContent.substring(0, 50).replace(/\n/g, ' ') + (textContent.length > 50 ? '...' : '');
+          console.log(`   Extracted user text: "${textPreview}"`);
+          markdown += textContent;
+        } else {
+          console.log(`   No text content extracted from user message`);
+        }
+      }
+
+      markdown += "\n";
+    }
+
+    // Convert to messages format expected by the extension
+    const messages = this.parseMarkdownToMessages(markdown);
+
+    console.log(`ClaudeExtractor: Extracted ${messages.length} messages`);
+    return messages;
+  }
+
+  // Check if element is a thinking section or should be filtered out
+  isThinkingSection(element) {
+    // Check for thinking section class indicators
+    const hasThinkingClass = element.classList.contains('text-text-300');
+
+    // Look for collapsible thinking sections - these have specific patterns
+    const hasCollapsibleButton = element.querySelector('button.group\\/row');
+    const hasCollapsibleContent = element.querySelector('.overflow-hidden.shrink-0');
+    const hasThinkingStructure = element.querySelector('.ease-out.rounded-lg.border-0\\.5');
+
+    const text = element.textContent || '';
+
+    // Check if this is a collapsed thinking section (has the collapsible structure)
+    const isCollapsibleThinking = hasCollapsibleButton && (hasCollapsibleContent || hasThinkingStructure);
+
+    // Check if this is content inside a thinking section (has the thinking class)
+    const isThinkingContent = hasThinkingClass;
+
+    // Check if this is just a model name or very short content that should be filtered
+    const isModelName = text.trim().length < 20 &&
+                       (text.includes('Sonnet') || text.includes('Claude') || text.includes('GPT'));
+
+    // For Claude responses, only filter if it has standard-markdown content but is a thinking section
+    const isClaude = element.classList.contains('font-claude-response');
+    const hasStandardMarkdown = element.querySelector('[class*="standard-markdown"]');
+
+    // If it's a Claude response with standard-markdown, don't filter it (we want the content)
+    if (isClaude && hasStandardMarkdown && !hasThinkingClass) {
+      return false;
+    }
+
+    const shouldFilter = isCollapsibleThinking || isThinkingContent || isModelName;
+
+    if (shouldFilter) {
+      console.log(`   Filtering element - thinking: ${isThinkingContent}, collapsible: ${isCollapsibleThinking}, model: ${isModelName}, text: "${text.substring(0, 50)}..."`);
+    }
+
+    return shouldFilter;
+  }
+
+  // Process Claude content from standard-markdown container
+  processClaudeContent(container) {
+    return this.processChildNodes(container.childNodes);
+  }
+
+  // Process user attachments
+  processUserAttachments(element) {
+    let result = '';
+
+    // Look for file attachments with various patterns
+    const fileAttachments = element.querySelectorAll('[data-testid="file-thumbnail"]');
+    if (fileAttachments.length > 0) {
+      result += `[User uploaded ${fileAttachments.length} file(s)]\n`;
+    }
+
+    // Look for images
+    const images = element.querySelectorAll('img');
+    if (images.length > 0) {
+      result += `[User uploaded ${images.length} image(s)]\n`;
+    }
+
+    // Look for pasted content (like the screenshot you showed)
+    const pastedContent = element.querySelector('div[class*="border"][class*="rounded"]');
+    if (pastedContent && element.textContent.includes('PASTED')) {
+      result += `[User pasted content]\n`;
+      // Try to extract any text from the pasted content
+      const pastedText = pastedContent.textContent.trim();
+      if (pastedText && pastedText !== 'PASTED') {
+        result += `Pasted content: ${pastedText}\n`;
+      }
+    }
+
+    // Look for any other attachment indicators
+    const attachmentDivs = element.querySelectorAll('div[class*="bg-"][class*="border"]');
+    if (attachmentDivs.length > 0 && !result) {
+      // Check if any of these contain file-like content
+      for (const div of attachmentDivs) {
+        const text = div.textContent.trim();
+        if (text && text.length > 10 && text.length < 500) { // Reasonable attachment text length
+          result += `[User attachment: ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}]\n`;
+          break;
+        }
+      }
+    }
+
+    return result;
+  }
+
+  // Process child nodes (extracted from original logic)
+  processChildNodes(childNodes) {
+    let markdown = '';
+    for (let n = 0; n < childNodes.length; n++) {
+      const childNode = childNodes[n];
+
+      if (childNode.nodeType === Node.ELEMENT_NODE) {
+        const tag = childNode.tagName;
+        const text = childNode.textContent;
+
+        // Paragraphs
+        if (tag === "P") {
+          markdown += `${text}\n`;
+        }
+
+        // Headings
+        if (tag === "H1") markdown += `# ${text}\n`;
+        if (tag === "H2") markdown += `## ${text}\n`;
+        if (tag === "H3") markdown += `### ${text}\n`;
+        if (tag === "H4") markdown += `#### ${text}\n`;
+        if (tag === "H5") markdown += `##### ${text}\n`;
+        if (tag === "H6") markdown += `###### ${text}\n`;
+
+        // Get list items
+        if (tag === "OL") {
+          childNode.childNodes.forEach((listItemNode, index) => {
+            if (
+              listItemNode.nodeType === Node.ELEMENT_NODE &&
+              listItemNode.tagName === "LI"
+            ) {
+              markdown += `${index + 1}. ${listItemNode.textContent}\n`;
+            }
+          });
+        }
+        if (tag === "UL") {
+          childNode.childNodes.forEach((listItemNode) => {
+            if (
+              listItemNode.nodeType === Node.ELEMENT_NODE &&
+              listItemNode.tagName === "LI"
+            ) {
+              markdown += `- ${listItemNode.textContent}\n`;
+            }
+          });
+        }
+
+        // Code blocks
+        if (tag === "PRE") {
+          const codeEle = childNode.querySelector("code");
+          if (codeEle) {
+            const codeText = codeEle.textContent;
+            const codeBlockLang = codeEle.classList[0] ? codeEle.classList[0].split("-")[1] : "";
+            markdown += `\`\`\`${codeBlockLang}\n${codeText}\n\`\`\`\n`;
+          }
+        }
+
+        // Tables
+        if (tag === "TABLE") {
+          // Get table sections
+          let tableMarkdown = "";
+          childNode.childNodes.forEach((tableSectionNode) => {
+            if (
+              tableSectionNode.nodeType === Node.ELEMENT_NODE &&
+              (tableSectionNode.tagName === "THEAD" ||
+                tableSectionNode.tagName === "TBODY")
+            ) {
+              // Get table rows
+              let tableRows = "";
+              let tableColCount = 0;
+              tableSectionNode.childNodes.forEach((tableRowNode) => {
+                if (
+                  tableRowNode.nodeType === Node.ELEMENT_NODE &&
+                  tableRowNode.tagName === "TR"
+                ) {
+                  // Get table cells
+                  let tableCells = "";
+                  tableRowNode.childNodes.forEach((tableCellNode) => {
+                    if (
+                      tableCellNode.nodeType === Node.ELEMENT_NODE &&
+                      (tableCellNode.tagName === "TD" ||
+                        tableCellNode.tagName === "TH")
+                    ) {
+                      tableCells += `| ${tableCellNode.textContent} `;
+                      if (tableSectionNode.tagName === "THEAD") {
+                        tableColCount++;
+                      }
+                    }
+                  });
+                  tableRows += `${tableCells}|\n`;
+                }
+              });
+
+              tableMarkdown += tableRows;
+
+              if (tableSectionNode.tagName === "THEAD") {
+                const headerRowDivider = `| ${Array(tableColCount)
+                  .fill("---")
+                  .join(" | ")} |\n`;
+                tableMarkdown += headerRowDivider;
+              }
+            }
+          });
+          markdown += tableMarkdown;
+        }
+
+        // Paragraph break after each element
+        markdown += "\n";
+      }
+    }
+
+    return markdown;
+  }
+
+  // Alternative extraction method using central container
+  extractFromCentralContainer(centralContainer, title, timestamp) {
+    console.log('Extracting from central container...');
+
+    let markdown = `# ${title}\n\`${timestamp}\`\n\n`;
+
+    // Look for message patterns in the central container
+    // Try to find elements that look like messages based on structure
+    const possibleMessages = centralContainer.querySelectorAll('div[class*="font-"], article, div[data-testid]');
+
+    console.log(`Found ${possibleMessages.length} possible message elements in central container`);
+
+    for (let i = 0; i < possibleMessages.length; i++) {
+      const element = possibleMessages[i];
+      const text = element.textContent?.trim();
+
+      if (!text || text.length < 10) continue; // Skip very short content
+
+      // Try to determine if this is a user or assistant message
+      const isUserMessage = element.classList.contains('font-user-message') ||
+                           element.hasAttribute('data-testid') && element.getAttribute('data-testid').includes('user');
+      const isAssistantMessage = element.classList.contains('font-claude-response') ||
+                                element.classList.contains('font-claude-message');
+
+      if (isUserMessage) {
+        markdown += `_Human_:\n${text}\n\n`;
+        console.log(`Added user message: ${text.substring(0, 50)}...`);
+      } else if (isAssistantMessage) {
+        markdown += `_Claude_:\n${text}\n\n`;
+        console.log(`Added Claude message: ${text.substring(0, 50)}...`);
+      } else {
+        // Try to guess based on content patterns
+        const looksLikeUserMessage = text.includes('?') || text.length < 200;
+        if (looksLikeUserMessage) {
+          markdown += `_Human_:\n${text}\n\n`;
+          console.log(`Guessed user message: ${text.substring(0, 50)}...`);
+        } else {
+          markdown += `_Claude_:\n${text}\n\n`;
+          console.log(`Guessed Claude message: ${text.substring(0, 50)}...`);
+        }
+      }
+    }
+
+    return this.parseMarkdownToMessages(markdown);
+  }
+
+  // Helper method to convert markdown back to messages format
+  parseMarkdownToMessages(markdown) {
+    const messages = [];
+    const lines = markdown.split('\n');
+    let currentMessage = null;
+
+    for (const line of lines) {
+      if (line.startsWith('_Claude_:')) {
+        if (currentMessage) messages.push(currentMessage);
+        currentMessage = { role: 'assistant', content: '', isPlainText: true };
+      } else if (line.startsWith('_Human_:')) {
+        if (currentMessage) messages.push(currentMessage);
+        currentMessage = { role: 'user', content: '', isPlainText: true };
+      } else if (currentMessage && line.trim()) {
+        currentMessage.content += (currentMessage.content ? '\n' : '') + line;
+      }
+    }
+
+    if (currentMessage) messages.push(currentMessage);
+    return messages.filter(m => m.content.trim());
+  }
+}
+
+async function downloadFromPageContext(filename, content) {
+  try {
+    const safeName = (filename || 'conversation.txt').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+    const blob = new Blob([content ?? ''], { type: 'text/plain;charset=utf-8' });
+    const blobUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = blobUrl;
+    anchor.download = safeName;
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+
+    setTimeout(() => {
+      URL.revokeObjectURL(blobUrl);
+    }, 30000);
+
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message || 'Download failed in page context.' };
+  }
+}
+
+function splitFilename(filename) {
+  const safeName = (filename || 'conversation.txt').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+  const lastDotIndex = safeName.lastIndexOf('.');
+
+  if (lastDotIndex > 0 && lastDotIndex < safeName.length - 1) {
+    return {
+      baseName: safeName.slice(0, lastDotIndex),
+      extension: safeName.slice(lastDotIndex)
+    };
+  }
+
+  return {
+    baseName: safeName,
+    extension: '.txt'
+  };
+}
+
+function buildPartFilename(filename, partNumber, totalParts) {
+  const { baseName, extension } = splitFilename(filename);
+  const digits = Math.max(3, String(totalParts).length);
+  return `${baseName}_part_${String(partNumber).padStart(digits, '0')}${extension}`;
+}
+
+async function downloadStringInChunks(filename, content, maxChunkChars = 600000) {
+  const safeContent = content || '';
+  if (safeContent.length <= maxChunkChars) {
+    return downloadFromPageContext(filename, safeContent);
+  }
+
+  const chunks = [];
+  for (let offset = 0; offset < safeContent.length; offset += maxChunkChars) {
+    chunks.push(safeContent.slice(offset, offset + maxChunkChars));
+  }
+
+  for (let i = 0; i < chunks.length; i++) {
+    const partNumber = i + 1;
+    const partFilename = buildPartFilename(filename, partNumber, chunks.length);
+    const header = `[Claude export part ${partNumber} of ${chunks.length}]\n\n`;
+    const result = await downloadFromPageContext(partFilename, `${header}${chunks[i]}`);
+    if (!result.success) {
+      return {
+        success: false,
+        error: result.error || `Failed downloading part ${partNumber}.`
+      };
+    }
+    if (partNumber < chunks.length) {
+      await new Promise(resolve => setTimeout(resolve, 120));
+    }
+  }
+
+  return { success: true, parts: chunks.length };
+}
+
+/**
+ * Main execution logic for the content script.
+ * Listens for the message from the background script to start extraction.
+ */
+if (typeof window.claude_extractor_injected === 'undefined') {
+    window.claude_extractor_injected = true;
+
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+        if (message.action === 'extractConversation') {
+            (async () => {
+                try {
+                    const extractor = new ClaudeExtractor();
+                    const conversationData = await extractor.extractConversation();
+
+                    if (conversationData && conversationData.length > 0) {
+                        // Generate filename: first_ten_chars_of_url_datetime_with_underscores
+                        const url = window.location.href;
+                        const urlStart = url.replace(/^https?:\/\//, '').substring(0, 10).replace(/[^a-z0-9]/gi, '_');
+                        const now = new Date();
+                        const datetime = now.toISOString().replace(/[-:T]/g, '_').split('.')[0]; // YYYY_MM_DD_HH_MM_SS
+                        const filename = `${urlStart}_${datetime}.txt`;
+
+                        // Use the content processor for consistent formatting
+                        // Check if ContentProcessor is available (it should be injected before this script)
+                        if (typeof window.ContentProcessor === 'undefined') {
+                            console.error('ContentProcessor not available, using fallback formatting');
+                            const formattedContent = `chat url: ${url}\n\n` +
+                                conversationData.map(msg => `${msg.role === 'user' ? 'Human' : 'Claude'}:\n${msg.content}`).join('\n\n');
+                            const fallbackDownloadResult = await downloadStringInChunks(filename, formattedContent, 600000);
+
+                            if (!fallbackDownloadResult.success) {
+                                throw new Error(fallbackDownloadResult.error || 'Failed to start download.');
+                            }
+
+                            sendResponse({
+                                success: true,
+                                downloaded: true,
+                                filename
+                            });
+                            return;
+                        }
+
+                        const contentProcessor = new window.ContentProcessor();
+                        const exportResult = await contentProcessor.downloadConversationInChunks(
+                            conversationData,
+                            {
+                                includeTimestamps: false,
+                                includeMetadata: true,
+                                platform: 'Claude',
+                                url: url
+                            },
+                            {
+                                filename,
+                                mimeType: 'text/plain;charset=utf-8',
+                                maxChunkChars: 600000,
+                                delayMs: 120
+                            }
+                        );
+
+                        if (!exportResult.success) {
+                            throw new Error(exportResult.error || 'Failed to start download.');
+                        }
+
+                        if (exportResult.parts > 1) {
+                            console.log(`Claude export split into ${exportResult.parts} files.`);
+                        }
+
+                        sendResponse({
+                            success: true,
+                            downloaded: true,
+                            filename,
+                            partCount: exportResult.parts
+                        });
+                    } else {
+                        throw new Error('No valid messages were extracted from the page.');
+                    }
+                } catch (error) {
+                    console.error('Extraction failed in content script:', error);
+                    sendResponse({ success: false, error: error.message });
+                }
+            })();
+        }
+        return true; // Keep message channel open for async response.
+    });
+}
+</file>
+
+<file path="extractors/grok-extractor.js">
+// Universal LLM Conversation Exporter - Grok Extractor
+
+class GrokExtractor {
+    constructor() {
+        this.selectors = {
+            // Message bubbles containing both user and Grok messages
+            messageBubble: 'div[class*="message-bubble"]',
+
+            // Elements to exclude (thinking containers)
+            thinkingContainer: 'div[class*="thinking-container"]'
+        };
+    }
+
+    /**
+     * Extract conversation from Grok interface
+     */
+    extractConversation() {
+        console.log('Grok Extractor: Starting extraction...');
+
+        const messages = [];
+
+        // Find all message bubble elements
+        const messageBubbles = Array.from(document.querySelectorAll(this.selectors.messageBubble));
+
+        // Filter out thinking containers
+        const validMessages = messageBubbles.filter(element => {
+            // Check if this element or any parent contains thinking-container class
+            let current = element;
+            while (current) {
+                if (current.className && current.className.includes('thinking-container')) {
+                    return false;
+                }
+                current = current.parentElement;
+            }
+            return true;
+        });
+
+        console.log(`Found ${messageBubbles.length} total message bubbles, ${validMessages.length} valid messages after filtering`);
+
+        // Process each valid message bubble
+        validMessages.forEach((element) => {
+            // Use plain text extraction for lower memory usage on large threads.
+            let content = '';
+            try {
+                content = element.innerText || element.textContent || '';
+            } catch (error) {
+                content = element.textContent || '';
+            }
+
+            if (content.trim()) {
+                // Try to determine if this is a user or assistant message
+                // This is a simple heuristic - you may need to adjust based on Grok's actual HTML structure
+                const isUserMessage = this.isUserMessage(element);
+                const role = isUserMessage ? 'user' : 'assistant';
+                const prefix = isUserMessage ? 'User: ' : 'Grok: ';
+
+                messages.push({
+                    role: role,
+                    content: `${prefix}${content.trim()}`,
+                    isPlainText: true
+                });
+            }
+        });
+
+        if (messages.length === 0) {
+            throw new Error('No messages found. Make sure you are on a Grok conversation page.');
+        }
+
+        console.log(`Grok Extractor: Successfully extracted ${messages.length} messages`);
+        return messages;
+    }
+
+    /**
+     * Determine if a message bubble is from the user
+     * This is a heuristic that may need adjustment based on Grok's actual HTML structure
+     */
+    isUserMessage(element) {
+        // Look for common indicators of user messages
+        const elementText = element.className || '';
+        const parentText = element.parentElement?.className || '';
+
+        // Common patterns for user messages (adjust as needed)
+        if (elementText.includes('user') || parentText.includes('user')) {
+            return true;
+        }
+
+        // If we can't determine, alternate between user and assistant
+        // This is a fallback - ideally we'd have better selectors
+        const allMessages = Array.from(document.querySelectorAll(this.selectors.messageBubble));
+        const index = allMessages.indexOf(element);
+        return index % 2 === 0; // Assume first message is user, then alternating
+    }
+
+    // All complex methods removed - using simple element selection
+}
+
+// Export for use in main extractor
+if (typeof window !== 'undefined') {
+    window.GrokExtractor = GrokExtractor;
+}
+
+// Message listener for content script
+if (typeof window.grok_extractor_injected === 'undefined') {
+    window.grok_extractor_injected = true;
+
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+        if (message.action === 'extractConversation') {
+            (async () => {
+                try {
+                    const extractor = new GrokExtractor();
+                    const conversationData = extractor.extractConversation();
+
+                    if (conversationData && conversationData.length > 0) {
+                        // Generate filename: first_ten_chars_of_url_datetime_with_underscores
+                        const url = window.location.href;
+                        const urlStart = url.replace(/^https?:\/\//, '').substring(0, 10).replace(/[^a-z0-9]/gi, '_');
+                        const now = new Date();
+                        const datetime = now.toISOString().replace(/[-:T]/g, '_').split('.')[0]; // YYYY_MM_DD_HH_MM_SS
+                        const filename = `${urlStart}_${datetime}.txt`;
+
+                        // Use chunked export to avoid creating one massive output file.
+                        const contentProcessor = new window.ContentProcessor();
+                        const exportResult = await contentProcessor.downloadConversationInChunks(
+                            conversationData,
+                            {
+                                includeTimestamps: false,
+                                includeMetadata: true,
+                                platform: 'Grok',
+                                url: url
+                            },
+                            {
+                                filename,
+                                mimeType: 'text/plain;charset=utf-8',
+                                maxChunkChars: 600000,
+                                delayMs: 120
+                            }
+                        );
+
+                        if (!exportResult.success) {
+                            throw new Error(exportResult.error || 'Failed to start download.');
+                        }
+
+                        if (exportResult.parts > 1) {
+                            console.log(`Grok export split into ${exportResult.parts} files.`);
+                        }
+
+                        sendResponse({
+                            success: true,
+                            downloaded: true,
+                            filename,
+                            partCount: exportResult.parts
+                        });
+                    } else {
+                        throw new Error('No valid messages were extracted from the page.');
+                    }
+                } catch (error) {
+                    console.error('Grok extraction error:', error);
+                    sendResponse({
+                        success: false,
+                        error: error.message,
+                    });
+                }
+            })();
+        }
+        return true;
+    });
+}
+</file>
+
+<file path="LICENSE">
+MIT License
+
+Copyright (c) 2025 panth-net
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+</file>
+
+<file path="offscreen.html">
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>LLM Conversation Exporter - Offscreen Document</title>
+</head>
+<body>
+    <script src="offscreen.js"></script>
+</body>
+</html>
+</file>
+
+<file path="offscreen.js">
+// Offscreen document for handling blob downloads in Manifest V3
+// This runs in a DOM context where URL.createObjectURL is available
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.action === 'createDownloadUrl') {
+        try {
+            // Create blob from the content
+            const blob = new Blob([message.content], { type: message.mimeType });
+            
+            // Create object URL (this works in offscreen document)
+            const url = URL.createObjectURL(blob);
+            
+            sendResponse({ success: true, url: url });
+            
+            // Clean up the URL after a delay to prevent memory leaks
+            setTimeout(() => {
+                URL.revokeObjectURL(url);
+            }, 60000); // 1 minute should be enough for download to start
+            
+        } catch (error) {
+            console.error('Error creating download URL:', error);
+            sendResponse({ success: false, error: error.message });
+        }
+    }
+    
+    return true; // Keep message channel open for async response
+});
+</file>
+
+<file path="PRIVACY_POLICY.md">
+# Privacy Policy
+Last Updated: September 2025
+
+This browser extension is built to be private and secure.
+
+## Core Principle: Simple app, just export -> to your computer
+The extension does not collect, store, transmit, or sell any personal information or conversation data. All processing occurs locally in your browser. The extension has no analytics, no tracking, and does not connect to any external servers.
+
+## How It Works
+When you click "export" on ChatGPT, Claude, Gemini, or Grok, the extension reads the conversation content from your current tab and saves it directly to your computer as a text file. It only accesses this data when you click "export."
+
+## Required Permissions
+The extension needs minimal permissions to function:
+
+### Access AI websites: To read conversation text for exporting.
+
+### Downloads: To save the exported files to your device.
+
+## Compliance
+This extension is designed to comply with Chrome Web Store policies and major privacy regulations like GDPR and CCPA.
+</file>
+
+<file path="README.md">
+# LLM Conversation Exporter
+
+An extension to export conversations from ChatGPT, Claude, Gemini, and Grok to plain text files. All processing happens locally in your browser.
+
+## 📖 Usage
+
+1. Navigate to ChatGPT, Claude, Gemini, or Grok
+2. Open a conversation you want to export
+3. Click the extension icon in your browser toolbar
+4. Click "Export Conversation"
+5. Your conversation will be downloaded as a text file
+
+## Supported Platforms
+- ChatGPT (OpenAI)
+- Claude (Anthropic)
+- Gemini (Google)
+- Grok (X)
+
+## Development Setup
+
+### Chrome
+1. Clone this repository
+2. Open Chrome and go to `chrome://extensions/`
+3. Enable "Developer mode" (top right toggle)
+4. Click "Load unpacked" and select this directory
+5. Extension icon appears in toolbar
+
+### Firefox
+This extension uses chrome.offscreen that are not available in Firefox. To port to Firefox, you'll need to replace this.
+
+## Privacy & Security
+
+- **No data collection**
+- **Local processing**
+- **No analytics**
+- **Open source**
+
+It's a quick project to solve a pain point -- no need to over-engineer. Click export -> exports .txt to your computer.
+
+## Forking and Contributing
+
+I won't be able to actively maintain this project. Please feel free to fork it or support on this repo.
+I've tried to make the selector paths as generic as possible to last longer, but they will inevitably break as the platforms update their code.
+
+## 📄 License
+
+MIT License - see LICENSE file for details.
+</file>
+
+<file path="STORE_LISTING.md">
+# LLM Conversation Exporter
+
+## Short Description
+Export conversations from ChatGPT, Claude, Gemini, and Grok to plain text files.
+
+## Detailed Description
+A simple, private, open-source extension to export your conversations from ChatGPT, Claude, Gemini, and Grok to a `.txt` file. All processing happens locally in your browser. We collect no data, have no analytics, and connect to no servers.
+
+## Limitations
+The attachments (like copied pasted long bits of text) in Claude won't be extracted.  
+Definitely google search other extensions like this one to handle Claude!  
+It's more likely to break than just grabbing the messages and would require more time to maintain -- but definitely doable 🙏🙏
+
+## How It Works
+Open a conversation, click the extension icon, then click **Export**.  
+Simple tool, simple purpose: Just export → to your computer.
+
+## Category
+Productivity
+
+## Language
+English
+
+## Data Usage Disclosure
+- No data is collected, stored, or transmitted.  
+- All processing is local in the browser.  
+- The extension has no analytics, tracking, or external server connections.
+
+## Permissions and Justification
+- **activeTab & scripting**: To read the conversation from the page for export.  
+- **downloads & offscreen**: To save the exported file to your computer.  
+- **Host permissions**: To run on supported AI chat websites (ChatGPT, Claude, Gemini, Grok).
+
+## Keywords / Tags
+AI · ChatGPT · Claude · Gemini · Grok · chat · LLM · conversation · export · backup · text · download · productivity
+</file>
+
+<file path="extractors/gemini-extractor.js">
+// Universal LLM Conversation Exporter - Gemini Extractor
+
+class GeminiExtractor {
+    constructor() {
+        this.selectors = {
+            // User query content
+            userQueryContent: 'user-query-content',
+
+            // Gemini message content
+            messageContent: 'message-content'
+        };
+    }
+
+    /**
+     * Extract conversation from Gemini interface
+     */
+    extractConversation() {
+        console.log('Gemini Extractor: Starting simple extraction...');
+
+        const messages = [];
+
+        // Find all elements of both types
+        const userElements = Array.from(document.querySelectorAll(this.selectors.userQueryContent));
+        const geminiElements = Array.from(document.querySelectorAll(this.selectors.messageContent));
+
+        console.log(`Found ${userElements.length} user messages and ${geminiElements.length} Gemini messages`);
+
+        // Combine all elements and sort by their position in the document (top to bottom)
+        const allElements = [
+            ...userElements.map(el => ({ element: el, type: 'user' })),
+            ...geminiElements.map(el => ({ element: el, type: 'assistant' }))
+        ];
+
+        // Sort by document position (top to bottom)
+        allElements.sort((a, b) => {
+            const position = a.element.compareDocumentPosition(b.element);
+            if (position & Node.DOCUMENT_POSITION_FOLLOWING) {
+                return -1; // a comes before b
+            } else if (position & Node.DOCUMENT_POSITION_PRECEDING) {
+                return 1; // a comes after b
+            }
+            return 0; // same position
+        });
+
+        // Process elements in order
+        allElements.forEach(({ element, type }) => {
+            // Use plain text extraction for lower memory usage on large threads.
+            let content = '';
+            try {
+                content = element.innerText || element.textContent || '';
+            } catch (error) {
+                content = element.textContent || '';
+            }
+
+            if (content.trim()) {
+                messages.push({
+                    role: type,
+                    content: content.trim(),
+                    isPlainText: true
+                });
+            }
+        });
+
+        if (messages.length === 0) {
+            throw new Error('No messages found. Make sure you are on a Gemini conversation page.');
+        }
+
+        console.log(`Gemini Extractor: Successfully extracted ${messages.length} messages in conversation order`);
+        return messages;
+    }
+
+    // All complex methods removed - using simple element selection
+}
+
+// Export for use in main extractor
+if (typeof window !== 'undefined') {
+    window.GeminiExtractor = GeminiExtractor;
+}
+
+// Message listener for content script
+if (typeof window.gemini_extractor_injected === 'undefined') {
+    window.gemini_extractor_injected = true;
+
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+        if (message.action === 'extractConversation') {
+            (async () => {
+                try {
+                    const extractor = new GeminiExtractor();
+                    const conversationData = extractor.extractConversation();
+
+                    if (conversationData && conversationData.length > 0) {
+                        // Generate filename: first_ten_chars_of_url_datetime_with_underscores
+                        const url = window.location.href;
+                        const urlStart = url.replace(/^https?:\/\//, '').substring(0, 10).replace(/[^a-z0-9]/gi, '_');
+                        const now = new Date();
+                        const datetime = now.toISOString().replace(/[-:T]/g, '_').split('.')[0]; // YYYY_MM_DD_HH_MM_SS
+                        const filename = `${urlStart}_${datetime}.txt`;
+
+                        // Use chunked export to avoid creating one massive output file.
+                        const contentProcessor = new window.ContentProcessor();
+                        const exportResult = await contentProcessor.downloadConversationInChunks(
+                            conversationData,
+                            {
+                                includeTimestamps: false,
+                                includeMetadata: true,
+                                platform: 'Gemini',
+                                url: url
+                            },
+                            {
+                                filename,
+                                mimeType: 'text/plain;charset=utf-8',
+                                maxChunkChars: 600000,
+                                delayMs: 120
+                            }
+                        );
+
+                        if (!exportResult.success) {
+                            throw new Error(exportResult.error || 'Failed to start download.');
+                        }
+
+                        if (exportResult.parts > 1) {
+                            console.log(`Gemini export split into ${exportResult.parts} files.`);
+                        }
+
+                        sendResponse({
+                            success: true,
+                            downloaded: true,
+                            filename,
+                            partCount: exportResult.parts
+                        });
+                    } else {
+                        throw new Error('No valid messages were extracted from the page.');
+                    }
+                } catch (error) {
+                    console.error('Gemini extraction error:', error);
+                    sendResponse({
+                        success: false,
+                        error: error.message,
+                    });
+                }
+            })();
+        }
+        return true;
+    });
+}
+</file>
+
+<file path="manifest.json">
+{
+  "manifest_version": 3,
+  "name": "LLM Conversation Exporter",
+  "description": "Export conversations from ChatGPT, Claude, Gemini, and Grok to text files. One-click export for AI chats.",
+  "version": "1.0.1",
+  "author": "Pantheon Network",
+  "homepage_url": "https://github.com/panth-net/llm-chat-export-extension/",
+
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "downloads",
+    "offscreen"
+  ],
+
+  "host_permissions": [
+    "*://chat.openai.com/*",
+    "*://chatgpt.com/*",
+    "*://claude.ai/*",
+    "*://gemini.google.com/*",
+    "*://x.com/i/grok*",
+    "*://grok.com/c/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Export LLM Conversation",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self';"
+  }
+}
+</file>
+
+<file path="utils/content-processor.js">
+// Universal LLM Conversation Exporter - Content Processing Engine
+
+class ContentProcessor {
+    constructor() {
+        this.markdownConverters = {
+            'h1': (text) => `# ${text}\n\n`,
+            'h2': (text) => `## ${text}\n\n`,
+            'h3': (text) => `### ${text}\n\n`,
+            'h4': (text) => `#### ${text}\n\n`,
+            'h5': (text) => `##### ${text}\n\n`,
+            'h6': (text) => `###### ${text}\n\n`,
+            'p': (text) => `${text}\n\n`,
+            'br': () => '\n',
+            'strong': (text) => `**${text}**`,
+            'b': (text) => `**${text}**`,
+            'em': (text) => `*${text}*`,
+            'i': (text) => `*${text}*`,
+            'code': (text) => `\`${text}\``,
+            'a': (text, element) => {
+                const href = element.getAttribute('href');
+                return href ? `[${text}](${href})` : text;
+            },
+            'img': (text, element) => {
+                const src = element.getAttribute('src');
+                const alt = element.getAttribute('alt') || text;
+                return src ? `![${alt}](${src})` : `[Image: ${alt}]`;
+            },
+            'blockquote': (text) => text.split('\n').map(line => `> ${line}`).join('\n') + '\n\n',
+            'ul': (text) => `${text}\n`,
+            'ol': (text) => `${text}\n`,
+            'li': (text, element, index) => {
+                const parent = element.parentElement;
+                const prefix = parent.tagName.toLowerCase() === 'ol' ? `${index + 1}. ` : '- ';
+                return `${prefix}${text}\n`;
+            }
+        };
+    }
+
+    /**
+     * Trigger a browser download from a content-script DOM context.
+     */
+    static async downloadContentAsFile({ filename, content, mimeType = 'text/plain' }) {
+        if (typeof document === 'undefined' || typeof URL === 'undefined') {
+            return { success: false, error: 'DOM download context is unavailable.' };
+        }
+
+        try {
+            const safeName = (filename || 'conversation.txt').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+            const blob = new Blob([content ?? ''], { type: mimeType });
+            const blobUrl = URL.createObjectURL(blob);
+
+            const anchor = document.createElement('a');
+            anchor.href = blobUrl;
+            anchor.download = safeName;
+            anchor.style.display = 'none';
+            anchor.rel = 'noopener';
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+
+            setTimeout(() => {
+                URL.revokeObjectURL(blobUrl);
+            }, 30000);
+
+            return { success: true };
+        } catch (error) {
+            console.error('Failed to download content from page context:', error);
+            return { success: false, error: error.message || 'Unknown download error.' };
+        }
+    }
+
+    static splitFilename(filename) {
+        const safeName = (filename || 'conversation.txt').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+        const lastDotIndex = safeName.lastIndexOf('.');
+
+        if (lastDotIndex > 0 && lastDotIndex < safeName.length - 1) {
+            return {
+                baseName: safeName.slice(0, lastDotIndex),
+                extension: safeName.slice(lastDotIndex)
+            };
+        }
+
+        return {
+            baseName: safeName,
+            extension: '.txt'
+        };
+    }
+
+    static buildPartFilename(filename, partNumber, totalParts) {
+        const { baseName, extension } = ContentProcessor.splitFilename(filename);
+        const digits = Math.max(3, String(totalParts).length);
+        const paddedPart = String(partNumber).padStart(digits, '0');
+        return `${baseName}_part_${paddedPart}${extension}`;
+    }
+
+    static sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    /**
+     * Process conversation data into text format
+     * @param {Array} conversationData - Array of message objects
+     * @param {string} format - Output format (always 'text')
+     * @param {Object} options - Processing options
+     * @returns {string} - Formatted conversation content
+     */
+    processConversation(conversationData, format, options = {}) {
+        const {
+            includeTimestamps = false,
+            includeMetadata = true,
+            platform = 'unknown',
+            url = ''
+        } = options;
+
+        // Always return text format
+        return this.toText(conversationData, { includeTimestamps, includeMetadata, platform, url });
+    }
+
+    /**
+     * Convert conversation to plain text format
+     */
+    toText(conversationData, options) {
+        let text = '';
+
+        // Add URL at the top with validation
+        if (options.url && this.isValidUrl(options.url)) {
+            text += `chat url: ${options.url}\n\n`;
+        }
+
+        // Process each message with two newlines between articles
+        conversationData.forEach((message, index) => {
+            text += this.messageToText(message, options);
+
+            // Add two newlines between articles (except after the last one)
+            if (index < conversationData.length - 1) {
+                text += '\n\n';
+            }
+        });
+
+        return text.trim();
+    }
+
+    /**
+     * Convert conversation to chunked plain text parts.
+     */
+    toTextChunks(conversationData, options = {}, chunkOptions = {}) {
+        const maxChunkCharsRaw = Number(chunkOptions.maxChunkChars);
+        const maxChunkChars = Number.isFinite(maxChunkCharsRaw)
+            ? Math.max(50000, Math.floor(maxChunkCharsRaw))
+            : 700000;
+
+        const chunks = [];
+        const hasValidUrl = options.url && this.isValidUrl(options.url);
+        let currentText = hasValidUrl ? `chat url: ${options.url}\n\n` : '';
+        let currentChunkMessageCount = 0;
+        let chunkStartMessageIndex = 0;
+
+        for (let index = 0; index < conversationData.length; index++) {
+            const messageText = this.messageToText(conversationData[index], options);
+            const separator = index < conversationData.length - 1 ? '\n\n' : '';
+            const messageBlock = `${messageText}${separator}`;
+
+            // Avoid producing a header-only chunk when first message is large.
+            if (currentChunkMessageCount > 0 && (currentText.length + messageBlock.length > maxChunkChars)) {
+                chunks.push({
+                    text: currentText.trimEnd(),
+                    startMessageIndex: chunkStartMessageIndex,
+                    endMessageIndex: index - 1
+                });
+                currentText = '';
+                currentChunkMessageCount = 0;
+                chunkStartMessageIndex = index;
+            }
+
+            currentText += messageBlock;
+            currentChunkMessageCount++;
+        }
+
+        if (currentText.trim().length > 0) {
+            chunks.push({
+                text: currentText.trimEnd(),
+                startMessageIndex: chunkStartMessageIndex,
+                endMessageIndex: Math.max(0, conversationData.length - 1)
+            });
+        }
+
+        return chunks;
+    }
+
+    buildChunkHeader(partNumber, totalParts, chunk, platform = 'LLM') {
+        if (totalParts <= 1) {
+            return '';
+        }
+
+        const safePlatform = platform || 'LLM';
+        const start = chunk.startMessageIndex + 1;
+        const end = chunk.endMessageIndex + 1;
+        return `[${safePlatform} export part ${partNumber} of ${totalParts}]\nmessages: ${start}-${end}\n\n`;
+    }
+
+    /**
+     * Export conversation as one or more files based on chunk size limits.
+     */
+    async downloadConversationInChunks(conversationData, options = {}, downloadOptions = {}) {
+        const {
+            filename = 'conversation.txt',
+            mimeType = 'text/plain;charset=utf-8',
+            maxChunkChars = 700000,
+            delayMs = 120
+        } = downloadOptions;
+
+        const chunks = this.toTextChunks(conversationData, options, { maxChunkChars });
+        if (chunks.length === 0) {
+            return { success: false, error: 'No conversation content to export.' };
+        }
+
+        const totalParts = chunks.length;
+        const downloadedFiles = [];
+
+        for (let i = 0; i < chunks.length; i++) {
+            const partNumber = i + 1;
+            const chunk = chunks[i];
+            const partFilename = totalParts === 1
+                ? filename
+                : ContentProcessor.buildPartFilename(filename, partNumber, totalParts);
+            const content = `${this.buildChunkHeader(partNumber, totalParts, chunk, options.platform)}${chunk.text}`;
+
+            const result = await ContentProcessor.downloadContentAsFile({
+                filename: partFilename,
+                content,
+                mimeType
+            });
+
+            if (!result.success) {
+                return {
+                    success: false,
+                    error: result.error || `Failed downloading part ${partNumber}.`,
+                    failedPart: partNumber,
+                    parts: totalParts,
+                    files: downloadedFiles
+                };
+            }
+
+            downloadedFiles.push(partFilename);
+
+            if (partNumber < totalParts && delayMs > 0) {
+                await ContentProcessor.sleep(delayMs);
+            }
+        }
+
+        return {
+            success: true,
+            parts: totalParts,
+            files: downloadedFiles
+        };
+    }
+
+    /**
+     * Convert a single message to plain text
+     */
+    messageToText(message, options) {
+        let text = '';
+
+        // Add role header
+        const roleDisplay = this.getRoleDisplay(message.role);
+        text += `${roleDisplay}:\n`;
+
+        // Convert content to plain text (no timestamps)
+        const content = message && message.isPlainText
+            ? this.normalizePlainText(message.content)
+            : this.htmlToText(message.content);
+        text += content;
+
+        return text;
+    }
+
+    normalizePlainText(text) {
+        if (!text) return '';
+        return String(text).replace(/\r\n/g, '\n').trim();
+    }
+
+    /**
+     * Convert HTML content to Markdown
+     */
+    htmlToMarkdown(htmlContent) {
+        if (!htmlContent) return '';
+
+        // Only works in content script context where document is available
+        if (typeof document === 'undefined') {
+            console.warn('htmlToMarkdown: document not available, returning plain text');
+            return this.stripHtmlTags(htmlContent);
+        }
+
+        // Create a temporary DOM element to parse HTML safely
+        const tempDiv = document.createElement('div');
+        // SECURITY FIX: Use safe HTML parsing instead of innerHTML
+        this.safeSetHTML(tempDiv, htmlContent);
+
+        return this.processElementToMarkdown(tempDiv);
+    }
+
+    /**
+     * Convert HTML content to plain text
+     */
+    htmlToText(htmlContent) {
+        if (!htmlContent) return '';
+
+        // Only works in content script context where document is available
+        if (typeof document === 'undefined') {
+            return this.stripHtmlTags(htmlContent);
+        }
+
+        // Create a temporary DOM element to parse HTML safely
+        const tempDiv = document.createElement('div');
+        // SECURITY FIX: Use safe HTML parsing instead of innerHTML
+        this.safeSetHTML(tempDiv, htmlContent);
+
+        // Handle special elements for better formatting
+        // Use try-catch for each processing step to ensure one failure doesn't stop everything
+        try {
+            this.processTablesForText(tempDiv);
+        } catch (error) {
+            console.warn('Table processing failed, continuing with text extraction:', error);
+        }
+
+        try {
+            this.processCodeBlocksForText(tempDiv);
+        } catch (error) {
+            console.warn('Code block processing failed, continuing with text extraction:', error);
+        }
+
+        try {
+            this.processListsForText(tempDiv);
+        } catch (error) {
+            console.warn('List processing failed, continuing with text extraction:', error);
+        }
+
+        try {
+            this.processBlockElementsForText(tempDiv);
+        } catch (error) {
+            console.warn('Block element processing failed, continuing with text extraction:', error);
+        }
+
+        return tempDiv.textContent || tempDiv.innerText || '';
+    }
+
+    /**
+     * Safely set HTML content without XSS vulnerabilities
+     * Uses DOMParser for safe HTML parsing
+     */
+    safeSetHTML(element, htmlContent) {
+        if (!htmlContent) return;
+
+        try {
+            // Use DOMParser for safe HTML parsing
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(htmlContent, 'text/html');
+
+            // Remove potentially dangerous elements
+            this.sanitizeDocument(doc);
+
+            // Clear the target element
+            element.innerHTML = '';
+
+            // Append sanitized content
+            while (doc.body.firstChild) {
+                element.appendChild(doc.body.firstChild);
+            }
+        } catch (error) {
+            console.warn('Failed to parse HTML safely, falling back to text content:', error);
+            element.textContent = this.stripHtmlTags(htmlContent);
+        }
+    }
+
+    /**
+     * Remove potentially dangerous elements and attributes from parsed document
+     */
+    sanitizeDocument(doc) {
+        // Remove script tags
+        const scripts = doc.querySelectorAll('script');
+        scripts.forEach(script => script.remove());
+
+        // Remove style tags
+        const styles = doc.querySelectorAll('style');
+        styles.forEach(style => style.remove());
+
+        // Remove on* event attributes from all elements
+        const allElements = doc.querySelectorAll('*');
+        allElements.forEach(element => {
+            // Remove all event handler attributes
+            for (let i = element.attributes.length - 1; i >= 0; i--) {
+                const attr = element.attributes[i];
+                if (attr.name.toLowerCase().startsWith('on')) {
+                    element.removeAttribute(attr.name);
+                }
+            }
+
+            // Remove dangerous attributes
+            const dangerousAttrs = ['javascript:', 'data:', 'vbscript:', 'file:'];
+            ['href', 'src', 'action', 'formaction', 'data'].forEach(attrName => {
+                const attrValue = element.getAttribute(attrName);
+                if (attrValue) {
+                    const lowerValue = attrValue.toLowerCase().trim();
+                    if (dangerousAttrs.some(dangerous => lowerValue.startsWith(dangerous))) {
+                        element.removeAttribute(attrName);
+                    }
+                }
+            });
+        });
+    }
+
+    /**
+     * Process DOM element to Markdown recursively
+     */
+    processElementToMarkdown(element) {
+        let result = '';
+
+        for (const node of element.childNodes) {
+            if (node.nodeType === Node.TEXT_NODE) {
+                result += node.textContent;
+            } else if (node.nodeType === Node.ELEMENT_NODE) {
+                const tagName = node.tagName.toLowerCase();
+                const textContent = this.processElementToMarkdown(node);
+
+                if (tagName === 'table') {
+                    result += this.tableToMarkdown(node);
+                } else if (tagName === 'pre') {
+                    result += this.preToMarkdown(node);
+                } else if (this.markdownConverters[tagName]) {
+                    const converter = this.markdownConverters[tagName];
+                    const index = Array.from(node.parentElement?.children || []).indexOf(node);
+                    result += converter(textContent, node, index);
+                } else {
+                    result += textContent;
+                }
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * Convert HTML table to Markdown table
+     */
+    tableToMarkdown(tableElement) {
+        const rows = Array.from(tableElement.querySelectorAll('tr'));
+        if (rows.length === 0) return '';
+
+        let markdown = '\n';
+        
+        rows.forEach((row, rowIndex) => {
+            const cells = Array.from(row.querySelectorAll('td, th'));
+            const cellContents = cells.map(cell => 
+                this.htmlToText(cell.innerHTML).replace(/\|/g, '\\|').trim()
+            );
+            
+            markdown += `| ${cellContents.join(' | ')} |\n`;
+            
+            // Add header separator after first row
+            if (rowIndex === 0 && cells.length > 0) {
+                markdown += `| ${cells.map(() => '---').join(' | ')} |\n`;
+            }
+        });
+        
+        return markdown + '\n';
+    }
+
+    /**
+     * Convert pre/code blocks to Markdown
+     */
+    preToMarkdown(preElement) {
+        const codeElement = preElement.querySelector('code');
+        const content = codeElement ? codeElement.textContent : preElement.textContent;
+        const language = this.detectCodeLanguage(preElement);
+        
+        return `\n\`\`\`${language}\n${content}\n\`\`\`\n\n`;
+    }
+
+    /**
+     * Process tables for plain text output
+     */
+    processTablesForText(element) {
+        const tables = element.querySelectorAll('table');
+        tables.forEach(table => {
+            try {
+                const textTable = this.tableToText(table);
+                table.replaceWith(document.createTextNode(textTable));
+            } catch (error) {
+                console.warn('Failed to process table, falling back to text content:', error);
+                // Fallback: just get the text content of the table
+                const fallbackText = `\n${table.textContent || ''}\n`;
+                table.replaceWith(document.createTextNode(fallbackText));
+            }
+        });
+    }
+
+    /**
+     * Convert table to plain text format
+     */
+    tableToText(tableElement) {
+        try {
+            const rows = Array.from(tableElement.querySelectorAll('tr'));
+            let text = '\n';
+
+            rows.forEach(row => {
+                const cells = Array.from(row.querySelectorAll('td, th'));
+                const cellContents = cells.map(cell => {
+                    try {
+                        return (cell.textContent || '').trim();
+                    } catch (e) {
+                        return '';
+                    }
+                });
+                text += cellContents.join('\t') + '\n';
+            });
+
+            return text + '\n';
+        } catch (error) {
+            // If table parsing completely fails, just return the text content
+            return `\n${tableElement.textContent || ''}\n`;
+        }
+    }
+
+    /**
+     * Process code blocks for plain text
+     */
+    processCodeBlocksForText(element) {
+        const codeBlocks = element.querySelectorAll('pre, code');
+        codeBlocks.forEach(block => {
+            try {
+                const content = block.textContent || '';
+                block.replaceWith(document.createTextNode(`\n${content}\n`));
+            } catch (error) {
+                console.warn('Failed to process code block, falling back to text content:', error);
+                // Fallback: just get the text content
+                const fallbackText = `\n${block.textContent || ''}\n`;
+                block.replaceWith(document.createTextNode(fallbackText));
+            }
+        });
+    }
+
+    /**
+     * Process lists for plain text
+     */
+    processListsForText(element) {
+        const lists = element.querySelectorAll('ul, ol');
+        lists.forEach(list => {
+            try {
+                const items = Array.from(list.querySelectorAll('li'));
+                const isOrdered = list.tagName.toLowerCase() === 'ol';
+
+                let text = '\n';
+                items.forEach((item, index) => {
+                    try {
+                        const prefix = isOrdered ? `${index + 1}. ` : '• ';
+                        text += `${prefix}${(item.textContent || '').trim()}\n`;
+                    } catch (e) {
+                        // Skip problematic list items but continue with others
+                        console.warn('Failed to process list item, skipping:', e);
+                    }
+                });
+                text += '\n';
+
+                list.replaceWith(document.createTextNode(text));
+            } catch (error) {
+                console.warn('Failed to process list, falling back to text content:', error);
+                // Fallback: just get the text content of the list
+                const fallbackText = `\n${list.textContent || ''}\n`;
+                list.replaceWith(document.createTextNode(fallbackText));
+            }
+        });
+    }
+
+    /**
+     * Process block elements to ensure proper line breaks
+     */
+    processBlockElementsForText(element) {
+        // STEP 1: Add spacing between sibling elements BEFORE destroying DOM structure
+        this.addSpacingBetweenSiblings(element);
+
+        // STEP 2: Handle line break elements
+        const lineBreaks = element.querySelectorAll('br');
+        lineBreaks.forEach(br => {
+            br.replaceWith(document.createTextNode('\n'));
+        });
+
+        // STEP 3: Process block elements to ensure proper line breaks
+        const blockElements = element.querySelectorAll('div, p, h1, h2, h3, h4, h5, h6, blockquote, section, article, header, footer, nav, aside, main');
+        blockElements.forEach(block => {
+            // Add line breaks around block elements if they don't already have them
+            const text = block.textContent;
+            if (text && text.trim()) {
+                // Only add breaks if this element has meaningful content
+                const textNode = document.createTextNode(`\n${text.trim()}\n`);
+                block.replaceWith(textNode);
+            }
+        });
+    }
+
+    /**
+     * Add spacing between sibling elements that should be separated
+     * This runs BEFORE elements are replaced, preserving DOM structure for better decisions
+     */
+    addSpacingBetweenSiblings(element) {
+        // Recursively process all containers first
+        const containers = element.querySelectorAll('div, span, section, article, header, footer, nav, aside, main');
+        containers.forEach(container => {
+            this.processDirectChildren(container);
+        });
+
+        // Process the root element's direct children
+        this.processDirectChildren(element);
+    }
+
+    /**
+     * Process direct children of a container to add appropriate spacing
+     */
+    processDirectChildren(container) {
+        const children = Array.from(container.children);
+
+        for (let i = 0; i < children.length - 1; i++) {
+            const current = children[i];
+            const next = children[i + 1];
+
+            // Get text content for both elements
+            const currentText = current.textContent ? current.textContent.trim() : '';
+            const nextText = next.textContent ? next.textContent.trim() : '';
+
+            // Skip if either element doesn't have meaningful content
+            if (!currentText || !nextText || currentText.length < 3 || nextText.length < 3) {
+                continue;
+            }
+
+            // Determine if these elements should be separated
+            const shouldSeparate = this.shouldSeparateElements(current, next, currentText, nextText);
+
+            if (shouldSeparate) {
+                // Insert spacing between the elements
+                const spacer = document.createTextNode('\n');
+                container.insertBefore(spacer, next);
+            }
+        }
+    }
+
+    /**
+     * Determine if two sibling elements should be separated with a newline
+     */
+    shouldSeparateElements(current, next, currentText, nextText) {
+        // Always separate if one is a block element
+        const blockTags = ['div', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'section', 'article'];
+        if (blockTags.includes(current.tagName?.toLowerCase()) || blockTags.includes(next.tagName?.toLowerCase())) {
+            return true;
+        }
+
+        // Separate spans that contain substantial content (likely UI messages)
+        if (current.tagName?.toLowerCase() === 'span' && next.tagName?.toLowerCase() === 'span') {
+            // If both spans have substantial content, separate them
+            if (currentText.length > 10 && nextText.length > 10) {
+                return true;
+            }
+        }
+
+        // Separate buttons from other content
+        if (current.tagName?.toLowerCase() === 'button' || next.tagName?.toLowerCase() === 'button') {
+            return true;
+        }
+
+        // Don't separate short inline elements (like single words, icons, etc.)
+        return false;
+    }
+
+    /**
+     * Generate Markdown header with metadata
+     */
+    generateMarkdownHeader(conversationData, platform) {
+        const now = new Date();
+        const title = this.generateConversationTitle(conversationData);
+        
+        return `# ${title}\n\n` +
+               `**Platform:** ${platform}\n` +
+               `**Export Date:** ${now.toISOString()}\n` +
+               `**Message Count:** ${conversationData.length}\n\n` +
+               `---\n\n`;
+    }
+
+    /**
+     * Generate conversation title from first message
+     */
+    generateConversationTitle(conversationData) {
+        if (conversationData.length === 0) return 'Empty Conversation';
+        
+        const firstMessage = conversationData.find(msg => msg.role === 'user');
+        if (!firstMessage) return 'LLM Conversation';
+        
+        const content = this.htmlToText(firstMessage.content);
+        const title = content.substring(0, 50).trim();
+        return title.length < content.length ? `${title}...` : title;
+    }
+
+    /**
+     * Get display name for message role
+     */
+    getRoleDisplay(role) {
+        const roleMap = {
+            'user': 'User',
+            'assistant': 'Assistant',
+            'system': 'System',
+            'claude': 'Claude',
+            'gpt': 'ChatGPT',
+            'gemini': 'Gemini',
+            'grok': 'Grok'
+        };
+        return roleMap[role] || role.charAt(0).toUpperCase() + role.slice(1);
+    }
+
+    /**
+     * Detect programming language from code block
+     */
+    detectCodeLanguage(element) {
+        // Look for language hints in class names
+        const classNames = element.className || '';
+        const langMatch = classNames.match(/language-(\w+)|lang-(\w+)/);
+        if (langMatch) {
+            return langMatch[1] || langMatch[2];
+        }
+        
+        // Look for data attributes
+        const dataLang = element.getAttribute('data-language');
+        if (dataLang) return dataLang;
+        
+        return '';
+    }
+
+    /**
+     * Validate URL for security
+     */
+    isValidUrl(url) {
+        if (typeof url !== 'string') return false;
+
+        try {
+            const urlObj = new URL(url);
+            // Only allow https and http protocols
+            if (!['https:', 'http:'].includes(urlObj.protocol)) {
+                return false;
+            }
+
+            // Check against allowed domains
+            const allowedDomains = [
+                'chat.openai.com',
+                'chatgpt.com',
+                'claude.ai',
+                'gemini.google.com',
+                'x.com',
+                'grok.com'
+            ];
+
+            return allowedDomains.some(domain =>
+                urlObj.hostname === domain || urlObj.hostname.endsWith('.' + domain)
+            );
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Fallback method to strip HTML tags when DOM is not available
+     */
+    stripHtmlTags(html) {
+        if (!html) return '';
+
+        // Simple regex-based HTML tag removal (fallback for service worker context)
+        return html
+            .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '') // Remove script tags
+            .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '') // Remove style tags
+            .replace(/<[^>]*>/g, '') // Remove all other HTML tags
+            .replace(/&nbsp;/g, ' ') // Replace non-breaking spaces
+            .replace(/&amp;/g, '&') // Replace HTML entities
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .replace(/\s+/g, ' ') // Normalize whitespace
+            .trim();
+    }
+}
+
+// Export for use in other modules - Context aware
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = ContentProcessor;
+} else {
+    // Detect execution context and use appropriate global scope
+    const isServiceWorker = typeof window === 'undefined' && typeof self !== 'undefined';
+    const globalScope = isServiceWorker ? self : (typeof window !== 'undefined' ? window : globalThis);
+
+    globalScope.ContentProcessor = ContentProcessor;
+}
+</file>
+
+<file path="popup.css">
+/* Universal LLM Conversation Exporter - Popup Styles */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    font-size: 14px;
+    line-height: 1.4;
+    color: #333;
+    background: #ffffff;
+    width: 320px;
+    min-height: 400px;
+    display: flex;
+    flex-direction: column;
+}
+
+.container {
+    display: flex;
+    flex-direction: column;
+    min-height: 400px;
+    padding: 16px;
+    flex: 1;
+}
+
+/* Header */
+.header {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    padding-left: 6px;
+    padding-right: 6px;
+    border-bottom: 1px solid #e5e5e5;
+}
+
+.icon {
+    width: 128px;
+    height: 128px;
+}
+
+.header-links {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    color: #666;
+    width: 100%;
+}
+
+/* Main Content */
+.main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+/* Platform Info */
+.platform-info {
+    background: #f8f9fa;
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.platform-indicator {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.platform-name {
+    font-weight: 500;
+    color: #333;
+}
+
+.platform-status {
+    font-size: 12px;
+    color: #28a745;
+}
+
+.platform-status.error {
+    color: #C64E21;
+}
+
+.platform-status.warning {
+    color: #ffc107;
+}
+
+/* Export Section */
+.export-section {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    flex: 1;
+}
+
+/* Export Options */
+.export-options {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.option-group {
+    display: flex;
+    align-items: center;
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    color: #333;
+}
+
+.checkbox-label input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+}
+
+/* Export Button Container */
+.export-button-container {
+    margin-top: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-direction: column;
+    gap: 16px;
+    flex: 1;
+}
+
+/* Export Button */
+.export-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 14px 28px;
+    background: #C64E21;
+    color: white;
+    border: none;
+    border-radius: 12px;
+    font-size: 15px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    box-shadow: 0 2px 8px rgba(229, 171, 70, 0.2);
+    min-width: 180px;
+}
+
+.export-button:hover {
+    background: #C64E21;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(229, 171, 70, 0.3);
+}
+
+.export-button:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 6px rgba(229, 171, 70, 0.2);
+}
+
+.export-button:disabled {
+    background: #9ca3af;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+/* Error Section */
+.error-section {
+    text-align: left;
+    padding: 20px 0;
+}
+
+.error-message {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+    margin-bottom: 16px;
+    color: #C64E21;
+    font-weight: 500;
+}
+
+.error-icon {
+    font-size: 18px;
+}
+
+.supported-platforms {
+    text-align: left;
+    background: #f8f9fa;
+    border-radius: 6px;
+    padding: 12px;
+}
+
+.supported-title {
+    font-weight: 500;
+    margin-bottom: 8px;
+    color: #333;
+}
+
+.platform-list {
+    list-style: none;
+    padding-left: 0;
+}
+
+.platform-list li {
+    padding: 2px 0;
+    color: #666;
+    font-size: 13px;
+}
+
+.platform-list li:before {
+    content: "\2022";
+    color: #007bff;
+    margin-right: 8px;
+}
+
+
+
+
+
+.version-info {
+    font-weight: 500;
+    color: #9ca3af;
+}
+
+/* Responsive adjustments */
+@media (max-width: 350px) {
+    body {
+        width: 280px;
+    }
+    
+    .container {
+        padding: 12px;
+    }
+}
+</file>
+
+<file path="popup.html">
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Conversation Exporter</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="header-links">
+                <div class="version-info">v1.0.0</div>
+            </div>
+        </header>
+        
+        <main class="main">
+            <div class="export-section" id="exportSection" style="display: none;">
+                <div class="export-options">
+                    <div class="option-group" style="display: none;">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="includeMetadata" checked>
+                            <span class="checkmark"></span>
+                            Include conversation metadata
+                        </label>
+                    </div>
+                </div>
+
+                <div class="export-button-container">
+                    <img src="icons/icon-128.png" alt="Extension Icon" class="icon">
+                    <button class="export-button" id="exportButton">
+                        Export Chat
+                    </button>
+                </div>
+            </div>
+            
+            <div class="error-section" id="errorSection" style="display: none;">
+                <div class="error-message">
+                    <span class="error-icon"></span>
+                    <span class="error-text" id="errorText">Platform not supported</span>
+                </div>
+                <div class="supported-platforms">
+                    <p class="supported-title">Supported platforms:</p>
+                    <ul class="platform-list">
+                        <li>ChatGPT</li>
+                        <li>Claude</li>
+                        <li>Gemini</li>
+                        <li>Grok</li>
+                    </ul>
+                </div>
+            </div>
+            
+
+        </main>
+
+        <div class="platform-info" id="platformInfo">
+            <div class="platform-indicator" id="platformIndicator">
+                <span class="platform-name" id="platformName">Detecting platform...</span>
+                <span class="platform-status" id="platformStatus">●</span>
+            </div>
+        </div>
+
+
+    </div>
+    
+    <script src="popup.js"></script>
+</body>
+</html>
+</file>
+
+<file path="popup.js">
+// Universal LLM Conversation Exporter - Popup Script
+
+class PopupController {
+    constructor() {
+        this.currentTab = null;
+        this.isExporting = false;
+        this.init();
+    }
+
+    async init() {
+        await this.loadCurrentTab();
+        this.setupEventListeners();
+        this.updateUI();
+    }
+
+    async loadCurrentTab() {
+        try {
+            // Get the current active tab directly
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+            if (tab) {
+                const platform = this.detectPlatform(tab.url);
+
+                this.currentTab = {
+                    id: tab.id,
+                    url: tab.url,
+                    platform: platform
+                };
+            }
+        } catch (error) {
+            console.error('Error loading current tab:', error);
+        }
+    }
+
+    detectPlatform(url) {
+        const platformPatterns = {
+            chatgpt: [
+                /^https?:\/\/chat\.openai\.com/,
+                /^https?:\/\/chatgpt\.com/
+            ],
+            claude: [
+                /^https?:\/\/claude\.ai/
+            ],
+            gemini: [
+                /^https?:\/\/gemini\.google\.com/
+            ],
+            grok: [
+                /^https?:\/\/x\.com\/i\/grok/,
+                /^https?:\/\/grok\.com\/c\//
+            ]
+        };
+
+        for (const [platform, patterns] of Object.entries(platformPatterns)) {
+            const matches = patterns.some(pattern => pattern.test(url));
+
+            if (matches) {
+                return platform;
+            }
+        }
+
+        return null;
+    }
+
+    setupEventListeners() {
+        // Export button
+        const exportButton = document.getElementById('exportButton');
+        exportButton.addEventListener('click', () => {
+            this.handleExport();
+        });
+    }
+
+    updateUI() {
+        const platformInfo = document.getElementById('platformInfo');
+        const exportSection = document.getElementById('exportSection');
+        const errorSection = document.getElementById('errorSection');
+        const platformName = document.getElementById('platformName');
+        const platformStatus = document.getElementById('platformStatus');
+
+        if (!this.currentTab || !this.currentTab.platform) {
+            // Show error state
+            platformInfo.style.display = 'none';
+            exportSection.style.display = 'none';
+            errorSection.style.display = 'block';
+
+            const errorText = document.getElementById('errorText');
+            errorText.textContent = 'This extension works on pages opened to LLM chats. Please navigate to a chat to export it.';
+            return;
+        }
+
+        // Show platform info and export section
+        platformInfo.style.display = 'block';
+        exportSection.style.display = 'block';
+        errorSection.style.display = 'none';
+
+        // Update platform display
+        const platformNames = {
+            chatgpt: 'ChatGPT',
+            claude: 'Claude',
+            gemini: 'Gemini',
+            grok: 'Grok'
+        };
+
+        const displayName = platformNames[this.currentTab.platform] || 'Unknown Platform';
+        platformName.textContent = displayName;
+        platformStatus.className = 'platform-status';
+        platformStatus.textContent = '●';
+    }
+
+    async handleExport() {
+        if (this.isExporting) {
+            return;
+        }
+
+        try {
+            this.isExporting = true;
+            this.showLoadingState();
+
+            const format = 'text';
+            const includeTimestamps = false;
+            const includeMetadata = true;
+
+            const message = {
+                action: 'exportConversation',
+                format: format,
+                tabId: this.currentTab.id,
+                platform: this.currentTab.platform,
+                options: {
+                    includeTimestamps,
+                    includeMetadata
+                }
+            };
+
+            const response = await chrome.runtime.sendMessage(message);
+
+            if (response.success) {
+                this.showSuccessState();
+                // Auto-close popup after success
+                setTimeout(() => {
+                    window.close();
+                }, 2000);
+            } else {
+                console.error('Export failed:', response.error);
+                this.showErrorState(response.error || 'Export failed');
+            }
+
+        } catch (error) {
+            console.error('Export error:', error);
+            this.showErrorState('An unexpected error occurred during export. Please try again.');
+        } finally {
+            this.isExporting = false;
+        }
+    }
+
+    showLoadingState() {
+        const exportButton = document.getElementById('exportButton');
+        exportButton.textContent = 'Exporting...';
+        exportButton.disabled = true;
+        exportButton.style.background = '#9ca3af';
+        exportButton.style.cursor = 'not-allowed';
+    }
+
+    showSuccessState() {
+        const exportButton = document.getElementById('exportButton');
+        exportButton.textContent = 'Export Completed!';
+        exportButton.disabled = true;
+        exportButton.style.background = '#28a745';
+        exportButton.style.cursor = 'not-allowed';
+    }
+
+    showErrorState(errorMessage) {
+        const exportButton = document.getElementById('exportButton');
+        exportButton.textContent = 'Export Failed';
+        exportButton.disabled = true;
+        exportButton.style.background = '#dc6571';
+        exportButton.style.cursor = 'not-allowed';
+
+        // Show error notification
+        this.showNotification(errorMessage, 'error');
+    }
+
+    showNotification(message, type = 'info') {
+        // Create notification element
+        const notification = document.createElement('div');
+        notification.className = `notification notification-${type}`;
+        notification.textContent = message;
+        
+        // Style the notification
+        Object.assign(notification.style, {
+            position: 'fixed',
+            top: '10px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            padding: '8px 16px',
+            borderRadius: '4px',
+            fontSize: '12px',
+            fontWeight: '500',
+            zIndex: '1000',
+            backgroundColor: type === 'error' ? '#d86d78ff' : '#28a745',
+            color: 'white'
+        });
+
+        document.body.appendChild(notification);
+
+        // Remove after 3 seconds
+        setTimeout(() => {
+            if (notification.parentNode) {
+                notification.parentNode.removeChild(notification);
+            }
+        }, 3000);
+    }
+}
+
+// Initialize popup when DOM is loaded
+document.addEventListener('DOMContentLoaded', () => {
+    new PopupController();
+});
+</file>
+
+</files>

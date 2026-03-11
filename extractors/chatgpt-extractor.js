@@ -14,7 +14,7 @@ class ChatGPTExtractor {
     /**
      * Entry point for extraction.
      */
-    extractConversation() {
+    async extractConversation() {
         console.log('ChatGPTExtractor: Starting simple article text extraction...');
         const messages = [];
         const articles = document.querySelectorAll(this.selectors.conversationTurn);
@@ -26,7 +26,8 @@ class ChatGPTExtractor {
 
         console.log(`Found ${articles.length} articles.`);
 
-        for (const article of articles) {
+        for (let index = 0; index < articles.length; index++) {
+            const article = articles[index];
             try {
                 const message = this.extractMessageFromArticle(article);
                 if (message) {
@@ -35,10 +36,19 @@ class ChatGPTExtractor {
             } catch (error) {
                 console.warn('Could not extract message from article:', error);
             }
+
+            // Yield periodically so very large chats don't block the tab for too long.
+            if ((index + 1) % 25 === 0) {
+                await this.yieldToMainThread();
+            }
         }
 
         console.log(`Successfully extracted ${messages.length} messages.`);
         return messages;
+    }
+
+    yieldToMainThread() {
+        return new Promise(resolve => setTimeout(resolve, 0));
     }
 
     /**
@@ -62,21 +72,20 @@ class ChatGPTExtractor {
             }
         }
 
-        // 2. Clone the article to avoid modifying the live page
-        const articleClone = articleElement.cloneNode(true);
+        // 2. Prefer the role container when present to reduce copied DOM size.
+        const contentRoot = roleElement ? roleElement : articleElement;
+        const articleClone = contentRoot.cloneNode(true);
 
         // 3. Remove UI elements for cleaner text
         const uiElements = articleClone.querySelectorAll(this.selectors.uiElementsToRemove);
         uiElements.forEach(el => el.remove());
 
-        // 4. FORMATTING FIX: Get HTML content to preserve structure, fallback to text
+        // 4. Extract plain text for fast processing and lower memory footprint.
         let content = '';
         try {
-            // Try to get HTML content first to preserve formatting
-            content = articleClone.innerHTML || articleClone.innerText || '';
+            content = articleClone.innerText || articleClone.textContent || '';
         } catch (error) {
-            // Fallback to text content if innerHTML fails
-            content = articleClone.innerText || '';
+            content = articleClone.textContent || '';
         }
 
         if (content.trim().length === 0) {
@@ -86,6 +95,7 @@ class ChatGPTExtractor {
         return {
             role: role,
             content: content.trim(),
+            isPlainText: true
         };
     }
 }
@@ -99,43 +109,59 @@ if (typeof window.chatGPT_extractor_injected === 'undefined') {
 
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         if (message.action === 'extractConversation') {
-            try {
-                const extractor = new ChatGPTExtractor();
-                const conversationData = extractor.extractConversation();
+            (async () => {
+                try {
+                    const extractor = new ChatGPTExtractor();
+                    const conversationData = await extractor.extractConversation();
 
-                if (conversationData && conversationData.length > 0) {
-                    // Generate filename: first_ten_chars_of_url_datetime_with_underscores
-                    const url = window.location.href;
-                    const urlStart = url.replace(/^https?:\/\//, '').substring(0, 10).replace(/[^a-z0-9]/gi, '_');
-                    const now = new Date();
-                    const datetime = now.toISOString().replace(/[-:T]/g, '_').split('.')[0]; // YYYY_MM_DD_HH_MM_SS
-                    const filename = `${urlStart}_${datetime}.txt`;
+                    if (conversationData && conversationData.length > 0) {
+                        // Generate filename: first_ten_chars_of_url_datetime_with_underscores
+                        const url = window.location.href;
+                        const urlStart = url.replace(/^https?:\/\//, '').substring(0, 10).replace(/[^a-z0-9]/gi, '_');
+                        const now = new Date();
+                        const datetime = now.toISOString().replace(/[-:T]/g, '_').split('.')[0]; // YYYY_MM_DD_HH_MM_SS
+                        const filename = `${urlStart}_${datetime}.txt`;
 
-                    // Use the content processor for consistent formatting
-                    const contentProcessor = new window.ContentProcessor();
-                    const formattedContent = contentProcessor.processConversation(
-                        conversationData,
-                        'text',
-                        {
-                            includeTimestamps: false,
-                            includeMetadata: true,
-                            platform: 'ChatGPT',
-                            url: url
+                        // Use chunked export to avoid creating one massive output file.
+                        const contentProcessor = new window.ContentProcessor();
+                        const exportResult = await contentProcessor.downloadConversationInChunks(
+                            conversationData,
+                            {
+                                includeTimestamps: false,
+                                includeMetadata: true,
+                                platform: 'ChatGPT',
+                                url: url
+                            },
+                            {
+                                filename,
+                                mimeType: 'text/plain;charset=utf-8',
+                                maxChunkChars: 600000,
+                                delayMs: 120
+                            }
+                        );
+
+                        if (!exportResult.success) {
+                            throw new Error(exportResult.error || 'Failed to start download.');
                         }
-                    );
 
-                    sendResponse({
-                        success: true,
-                        content: formattedContent,
-                        filename: filename,
-                    });
-                } else {
-                    throw new Error('No valid messages were extracted from the page.');
+                        if (exportResult.parts > 1) {
+                            console.log(`ChatGPT export split into ${exportResult.parts} files.`);
+                        }
+
+                        sendResponse({
+                            success: true,
+                            downloaded: true,
+                            filename,
+                            partCount: exportResult.parts
+                        });
+                    } else {
+                        throw new Error('No valid messages were extracted from the page.');
+                    }
+                } catch (error) {
+                    console.error('Extraction failed in content script:', error);
+                    sendResponse({ success: false, error: error.message });
                 }
-            } catch (error) {
-                console.error('Extraction failed in content script:', error);
-                sendResponse({ success: false, error: error.message });
-            }
+            })();
         }
         return true; // Keep message channel open for async response.
     });

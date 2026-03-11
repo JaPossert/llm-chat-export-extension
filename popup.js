@@ -215,8 +215,6 @@ class PopupController {
         }, 3000);
     }
 
-
-
     openHelpPage() {
         chrome.tabs.create({
             url: 'https://github.com/panth-net/llm-chat-export-extension/'

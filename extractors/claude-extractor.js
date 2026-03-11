@@ -463,10 +463,10 @@ class ClaudeExtractor {
     for (const line of lines) {
       if (line.startsWith('_Claude_:')) {
         if (currentMessage) messages.push(currentMessage);
-        currentMessage = { role: 'assistant', content: '' };
+        currentMessage = { role: 'assistant', content: '', isPlainText: true };
       } else if (line.startsWith('_Human_:')) {
         if (currentMessage) messages.push(currentMessage);
-        currentMessage = { role: 'user', content: '' };
+        currentMessage = { role: 'user', content: '', isPlainText: true };
       } else if (currentMessage && line.trim()) {
         currentMessage.content += (currentMessage.content ? '\n' : '') + line;
       }
@@ -475,6 +475,82 @@ class ClaudeExtractor {
     if (currentMessage) messages.push(currentMessage);
     return messages.filter(m => m.content.trim());
   }
+}
+
+async function downloadFromPageContext(filename, content) {
+  try {
+    const safeName = (filename || 'conversation.txt').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+    const blob = new Blob([content ?? ''], { type: 'text/plain;charset=utf-8' });
+    const blobUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = blobUrl;
+    anchor.download = safeName;
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+
+    setTimeout(() => {
+      URL.revokeObjectURL(blobUrl);
+    }, 30000);
+
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message || 'Download failed in page context.' };
+  }
+}
+
+function splitFilename(filename) {
+  const safeName = (filename || 'conversation.txt').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+  const lastDotIndex = safeName.lastIndexOf('.');
+
+  if (lastDotIndex > 0 && lastDotIndex < safeName.length - 1) {
+    return {
+      baseName: safeName.slice(0, lastDotIndex),
+      extension: safeName.slice(lastDotIndex)
+    };
+  }
+
+  return {
+    baseName: safeName,
+    extension: '.txt'
+  };
+}
+
+function buildPartFilename(filename, partNumber, totalParts) {
+  const { baseName, extension } = splitFilename(filename);
+  const digits = Math.max(3, String(totalParts).length);
+  return `${baseName}_part_${String(partNumber).padStart(digits, '0')}${extension}`;
+}
+
+async function downloadStringInChunks(filename, content, maxChunkChars = 600000) {
+  const safeContent = content || '';
+  if (safeContent.length <= maxChunkChars) {
+    return downloadFromPageContext(filename, safeContent);
+  }
+
+  const chunks = [];
+  for (let offset = 0; offset < safeContent.length; offset += maxChunkChars) {
+    chunks.push(safeContent.slice(offset, offset + maxChunkChars));
+  }
+
+  for (let i = 0; i < chunks.length; i++) {
+    const partNumber = i + 1;
+    const partFilename = buildPartFilename(filename, partNumber, chunks.length);
+    const header = `[Claude export part ${partNumber} of ${chunks.length}]\n\n`;
+    const result = await downloadFromPageContext(partFilename, `${header}${chunks[i]}`);
+    if (!result.success) {
+      return {
+        success: false,
+        error: result.error || `Failed downloading part ${partNumber}.`
+      };
+    }
+    if (partNumber < chunks.length) {
+      await new Promise(resolve => setTimeout(resolve, 120));
+    }
+  }
+
+  return { success: true, parts: chunks.length };
 }
 
 /**
@@ -503,34 +579,52 @@ if (typeof window.claude_extractor_injected === 'undefined') {
                         // Check if ContentProcessor is available (it should be injected before this script)
                         if (typeof window.ContentProcessor === 'undefined') {
                             console.error('ContentProcessor not available, using fallback formatting');
-                            // Fallback to simple formatting
                             const formattedContent = `chat url: ${url}\n\n` +
                                 conversationData.map(msg => `${msg.role === 'user' ? 'Human' : 'Claude'}:\n${msg.content}`).join('\n\n');
+                            const fallbackDownloadResult = await downloadStringInChunks(filename, formattedContent, 600000);
+
+                            if (!fallbackDownloadResult.success) {
+                                throw new Error(fallbackDownloadResult.error || 'Failed to start download.');
+                            }
 
                             sendResponse({
                                 success: true,
-                                content: formattedContent,
-                                filename: filename,
+                                downloaded: true,
+                                filename
                             });
                             return;
                         }
 
                         const contentProcessor = new window.ContentProcessor();
-                        const formattedContent = contentProcessor.processConversation(
+                        const exportResult = await contentProcessor.downloadConversationInChunks(
                             conversationData,
-                            'text',
                             {
                                 includeTimestamps: false,
                                 includeMetadata: true,
                                 platform: 'Claude',
                                 url: url
+                            },
+                            {
+                                filename,
+                                mimeType: 'text/plain;charset=utf-8',
+                                maxChunkChars: 600000,
+                                delayMs: 120
                             }
                         );
 
+                        if (!exportResult.success) {
+                            throw new Error(exportResult.error || 'Failed to start download.');
+                        }
+
+                        if (exportResult.parts > 1) {
+                            console.log(`Claude export split into ${exportResult.parts} files.`);
+                        }
+
                         sendResponse({
                             success: true,
-                            content: formattedContent,
-                            filename: filename,
+                            downloaded: true,
+                            filename,
+                            partCount: exportResult.parts
                         });
                     } else {
                         throw new Error('No valid messages were extracted from the page.');

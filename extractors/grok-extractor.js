@@ -39,14 +39,12 @@ class GrokExtractor {
 
         // Process each valid message bubble
         validMessages.forEach((element) => {
-            // FORMATTING FIX: Get innerHTML to preserve structure, fallback to text
+            // Use plain text extraction for lower memory usage on large threads.
             let content = '';
             try {
-                // Try to get HTML content first to preserve formatting
-                content = element.innerHTML || element.textContent || element.innerText || '';
+                content = element.innerText || element.textContent || '';
             } catch (error) {
-                // Fallback to text content if innerHTML fails
-                content = element.textContent || element.innerText || '';
+                content = element.textContent || '';
             }
 
             if (content.trim()) {
@@ -58,7 +56,8 @@ class GrokExtractor {
 
                 messages.push({
                     role: role,
-                    content: `${prefix}${content.trim()}`
+                    content: `${prefix}${content.trim()}`,
+                    isPlainText: true
                 });
             }
         });
@@ -106,46 +105,62 @@ if (typeof window.grok_extractor_injected === 'undefined') {
 
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         if (message.action === 'extractConversation') {
-            try {
-                const extractor = new GrokExtractor();
-                const conversationData = extractor.extractConversation();
+            (async () => {
+                try {
+                    const extractor = new GrokExtractor();
+                    const conversationData = extractor.extractConversation();
 
-                if (conversationData && conversationData.length > 0) {
-                    // Generate filename: first_ten_chars_of_url_datetime_with_underscores
-                    const url = window.location.href;
-                    const urlStart = url.replace(/^https?:\/\//, '').substring(0, 10).replace(/[^a-z0-9]/gi, '_');
-                    const now = new Date();
-                    const datetime = now.toISOString().replace(/[-:T]/g, '_').split('.')[0]; // YYYY_MM_DD_HH_MM_SS
-                    const filename = `${urlStart}_${datetime}.txt`;
+                    if (conversationData && conversationData.length > 0) {
+                        // Generate filename: first_ten_chars_of_url_datetime_with_underscores
+                        const url = window.location.href;
+                        const urlStart = url.replace(/^https?:\/\//, '').substring(0, 10).replace(/[^a-z0-9]/gi, '_');
+                        const now = new Date();
+                        const datetime = now.toISOString().replace(/[-:T]/g, '_').split('.')[0]; // YYYY_MM_DD_HH_MM_SS
+                        const filename = `${urlStart}_${datetime}.txt`;
 
-                    // Use the content processor for consistent formatting
-                    const contentProcessor = new window.ContentProcessor();
-                    const formattedContent = contentProcessor.processConversation(
-                        conversationData,
-                        'text',
-                        {
-                            includeTimestamps: false,
-                            includeMetadata: true,
-                            platform: 'Grok',
-                            url: url
+                        // Use chunked export to avoid creating one massive output file.
+                        const contentProcessor = new window.ContentProcessor();
+                        const exportResult = await contentProcessor.downloadConversationInChunks(
+                            conversationData,
+                            {
+                                includeTimestamps: false,
+                                includeMetadata: true,
+                                platform: 'Grok',
+                                url: url
+                            },
+                            {
+                                filename,
+                                mimeType: 'text/plain;charset=utf-8',
+                                maxChunkChars: 600000,
+                                delayMs: 120
+                            }
+                        );
+
+                        if (!exportResult.success) {
+                            throw new Error(exportResult.error || 'Failed to start download.');
                         }
-                    );
 
+                        if (exportResult.parts > 1) {
+                            console.log(`Grok export split into ${exportResult.parts} files.`);
+                        }
+
+                        sendResponse({
+                            success: true,
+                            downloaded: true,
+                            filename,
+                            partCount: exportResult.parts
+                        });
+                    } else {
+                        throw new Error('No valid messages were extracted from the page.');
+                    }
+                } catch (error) {
+                    console.error('Grok extraction error:', error);
                     sendResponse({
-                        success: true,
-                        content: formattedContent,
-                        filename: filename,
+                        success: false,
+                        error: error.message,
                     });
-                } else {
-                    throw new Error('No valid messages were extracted from the page.');
                 }
-            } catch (error) {
-                console.error('Grok extraction error:', error);
-                sendResponse({
-                    success: false,
-                    error: error.message,
-                });
-            }
+            })();
         }
         return true;
     });

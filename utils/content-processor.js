@@ -37,6 +37,67 @@ class ContentProcessor {
     }
 
     /**
+     * Trigger a browser download from a content-script DOM context.
+     */
+    static async downloadContentAsFile({ filename, content, mimeType = 'text/plain' }) {
+        if (typeof document === 'undefined' || typeof URL === 'undefined') {
+            return { success: false, error: 'DOM download context is unavailable.' };
+        }
+
+        try {
+            const safeName = (filename || 'conversation.txt').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+            const blob = new Blob([content ?? ''], { type: mimeType });
+            const blobUrl = URL.createObjectURL(blob);
+
+            const anchor = document.createElement('a');
+            anchor.href = blobUrl;
+            anchor.download = safeName;
+            anchor.style.display = 'none';
+            anchor.rel = 'noopener';
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+
+            setTimeout(() => {
+                URL.revokeObjectURL(blobUrl);
+            }, 30000);
+
+            return { success: true };
+        } catch (error) {
+            console.error('Failed to download content from page context:', error);
+            return { success: false, error: error.message || 'Unknown download error.' };
+        }
+    }
+
+    static splitFilename(filename) {
+        const safeName = (filename || 'conversation.txt').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+        const lastDotIndex = safeName.lastIndexOf('.');
+
+        if (lastDotIndex > 0 && lastDotIndex < safeName.length - 1) {
+            return {
+                baseName: safeName.slice(0, lastDotIndex),
+                extension: safeName.slice(lastDotIndex)
+            };
+        }
+
+        return {
+            baseName: safeName,
+            extension: '.txt'
+        };
+    }
+
+    static buildPartFilename(filename, partNumber, totalParts) {
+        const { baseName, extension } = ContentProcessor.splitFilename(filename);
+        const digits = Math.max(3, String(totalParts).length);
+        const paddedPart = String(partNumber).padStart(digits, '0');
+        return `${baseName}_part_${paddedPart}${extension}`;
+    }
+
+    static sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    /**
      * Process conversation data into text format
      * @param {Array} conversationData - Array of message objects
      * @param {string} format - Output format (always 'text')
@@ -80,6 +141,121 @@ class ContentProcessor {
     }
 
     /**
+     * Convert conversation to chunked plain text parts.
+     */
+    toTextChunks(conversationData, options = {}, chunkOptions = {}) {
+        const maxChunkCharsRaw = Number(chunkOptions.maxChunkChars);
+        const maxChunkChars = Number.isFinite(maxChunkCharsRaw)
+            ? Math.max(50000, Math.floor(maxChunkCharsRaw))
+            : 700000;
+
+        const chunks = [];
+        const hasValidUrl = options.url && this.isValidUrl(options.url);
+        let currentText = hasValidUrl ? `chat url: ${options.url}\n\n` : '';
+        let currentChunkMessageCount = 0;
+        let chunkStartMessageIndex = 0;
+
+        for (let index = 0; index < conversationData.length; index++) {
+            const messageText = this.messageToText(conversationData[index], options);
+            const separator = index < conversationData.length - 1 ? '\n\n' : '';
+            const messageBlock = `${messageText}${separator}`;
+
+            // Avoid producing a header-only chunk when first message is large.
+            if (currentChunkMessageCount > 0 && (currentText.length + messageBlock.length > maxChunkChars)) {
+                chunks.push({
+                    text: currentText.trimEnd(),
+                    startMessageIndex: chunkStartMessageIndex,
+                    endMessageIndex: index - 1
+                });
+                currentText = '';
+                currentChunkMessageCount = 0;
+                chunkStartMessageIndex = index;
+            }
+
+            currentText += messageBlock;
+            currentChunkMessageCount++;
+        }
+
+        if (currentText.trim().length > 0) {
+            chunks.push({
+                text: currentText.trimEnd(),
+                startMessageIndex: chunkStartMessageIndex,
+                endMessageIndex: Math.max(0, conversationData.length - 1)
+            });
+        }
+
+        return chunks;
+    }
+
+    buildChunkHeader(partNumber, totalParts, chunk, platform = 'LLM') {
+        if (totalParts <= 1) {
+            return '';
+        }
+
+        const safePlatform = platform || 'LLM';
+        const start = chunk.startMessageIndex + 1;
+        const end = chunk.endMessageIndex + 1;
+        return `[${safePlatform} export part ${partNumber} of ${totalParts}]\nmessages: ${start}-${end}\n\n`;
+    }
+
+    /**
+     * Export conversation as one or more files based on chunk size limits.
+     */
+    async downloadConversationInChunks(conversationData, options = {}, downloadOptions = {}) {
+        const {
+            filename = 'conversation.txt',
+            mimeType = 'text/plain;charset=utf-8',
+            maxChunkChars = 700000,
+            delayMs = 120
+        } = downloadOptions;
+
+        const chunks = this.toTextChunks(conversationData, options, { maxChunkChars });
+        if (chunks.length === 0) {
+            return { success: false, error: 'No conversation content to export.' };
+        }
+
+        const totalParts = chunks.length;
+        const downloadedFiles = [];
+
+        for (let i = 0; i < chunks.length; i++) {
+            const partNumber = i + 1;
+            const chunk = chunks[i];
+            const partFilename = totalParts === 1
+                ? filename
+                : ContentProcessor.buildPartFilename(filename, partNumber, totalParts);
+            const content = `${this.buildChunkHeader(partNumber, totalParts, chunk, options.platform)}${chunk.text}`;
+
+            const result = await ContentProcessor.downloadContentAsFile({
+                filename: partFilename,
+                content,
+                mimeType
+            });
+
+            if (!result.success) {
+                return {
+                    success: false,
+                    error: result.error || `Failed downloading part ${partNumber}.`,
+                    failedPart: partNumber,
+                    parts: totalParts,
+                    files: downloadedFiles
+                };
+            }
+
+            downloadedFiles.push(partFilename);
+
+            if (partNumber < totalParts && delayMs > 0) {
+                await ContentProcessor.sleep(delayMs);
+            }
+        }
+
+        return {
+            success: true,
+            parts: totalParts,
+            files: downloadedFiles
+        };
+    }
+
+    /**
      * Convert a single message to plain text
      */
     messageToText(message, options) {
@@ -90,10 +266,17 @@ class ContentProcessor {
         text += `${roleDisplay}:\n`;
 
         // Convert content to plain text (no timestamps)
-        const content = this.htmlToText(message.content);
+        const content = message && message.isPlainText
+            ? this.normalizePlainText(message.content)
+            : this.htmlToText(message.content);
         text += content;
 
         return text;
+    }
+
+    normalizePlainText(text) {
+        if (!text) return '';
+        return String(text).replace(/\r\n/g, '\n').trim();
     }
 
     /**
