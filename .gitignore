@@ -1,1 +1,5 @@
-./repomix-output.xml
+repomix-output.xml
+*.zip
+chatgpt_co_*.txt
+example-chatgpt.txt
+exmaple-chatgpt.txt
