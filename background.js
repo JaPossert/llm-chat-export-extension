@@ -10,6 +10,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
     }
 
+    // Auto-save trigger from content script — no response needed
+    if (message.action === 'checkAutoSave') {
+        if (sender.tab && sender.tab.id) {
+            handleAutoSave(sender.tab.id, message.url).catch(err =>
+                console.warn('Auto-save failed:', err.message)
+            );
+        }
+        return false;
+    }
+
     // Additional validation for tab-based messages
     if (message.action === 'exportConversation' && sender.tab) {
         if (!isValidUrl(sender.tab.url)) {
@@ -219,6 +229,85 @@ async function ensureOffscreenDocument() {
         console.error('Error creating offscreen document:', error);
         throw error;
     }
+}
+
+// Auto-save logic
+
+async function handleAutoSave(tabId, url) {
+    if (!url || !isValidUrl(url)) return;
+
+    const enabled = await getAutoSaveEnabled();
+    if (!enabled) return;
+
+    const platform = detectPlatformFromUrl(url);
+    if (!platform) return;
+
+    if (await wasAlreadySavedToday(url)) {
+        console.log(`Auto-save: already saved today — ${url}`);
+        return;
+    }
+
+    console.log(`Auto-save: saving ${platform} at ${url}`);
+
+    try {
+        await ensureExportScriptsInjected(tabId, platform);
+        const response = await chrome.tabs.sendMessage(tabId, {
+            action: 'extractConversation',
+            format: 'text'
+        });
+
+        if (response && response.success) {
+            await markSavedToday(url);
+            console.log(`Auto-save: done — ${url}`);
+        } else {
+            console.warn(`Auto-save: extractor returned no content — ${url}`);
+        }
+    } catch (err) {
+        console.warn(`Auto-save: extraction failed — ${err.message}`);
+    }
+}
+
+async function getAutoSaveEnabled() {
+    const { autoSaveEnabled } = await chrome.storage.sync.get({ autoSaveEnabled: false });
+    return autoSaveEnabled;
+}
+
+async function wasAlreadySavedToday(url) {
+    const { autosaveHistory } = await chrome.storage.local.get({ autosaveHistory: {} });
+    return autosaveHistory[normalizeUrlForHistory(url)] === todayString();
+}
+
+async function markSavedToday(url) {
+    const { autosaveHistory } = await chrome.storage.local.get({ autosaveHistory: {} });
+    autosaveHistory[normalizeUrlForHistory(url)] = todayString();
+    await chrome.storage.local.set({ autosaveHistory });
+}
+
+function normalizeUrlForHistory(url) {
+    try {
+        const u = new URL(url);
+        return u.origin + u.pathname;
+    } catch {
+        return url;
+    }
+}
+
+function todayString() {
+    return new Date().toISOString().split('T')[0];
+}
+
+function detectPlatformFromUrl(url) {
+    const patterns = [
+        { platform: 'chatgpt', tests: [/^https?:\/\/chat\.openai\.com/, /^https?:\/\/chatgpt\.com/] },
+        { platform: 'claude',  tests: [/^https?:\/\/claude\.ai/] },
+        { platform: 'gemini',  tests: [/^https?:\/\/gemini\.google\.com/] },
+        { platform: 'grok',    tests: [/^https?:\/\/x\.com\/i\/grok/, /^https?:\/\/grok\.com\/c\//] },
+        { platform: 'lumo',    tests: [/^https?:\/\/lumo\.proton\.me/] },
+    ];
+    for (const { platform, tests } of patterns) {
+        if (tests.some(t => t.test(url))) return platform;
+    }
+    return null;
 }
 
 // SECURITY: Input validation functions

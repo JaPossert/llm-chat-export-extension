@@ -71,6 +71,12 @@ class PopupController {
             this.handleExport();
         });
 
+        // Settings link
+        document.getElementById('settingsLink').addEventListener('click', (e) => {
+            e.preventDefault();
+            chrome.runtime.openOptionsPage();
+        });
+
         // Help link
         document.getElementById('helpLink').addEventListener('click', (e) => {
             e.preventDefault();

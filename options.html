@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM Chat Exporter — Settings</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 15px;
+      line-height: 1.5;
+      color: #333;
+      background: #f5f5f5;
+    }
+
+    .page {
+      max-width: 520px;
+      margin: 48px auto;
+      padding: 0 16px;
+    }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 600;
+      color: #111;
+      margin-bottom: 28px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .card-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111;
+    }
+
+    .card-desc {
+      font-size: 13px;
+      color: #666;
+      margin-bottom: 16px;
+    }
+
+    /* Toggle switch */
+    .toggle-label {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .toggle-label input[type="checkbox"] {
+      display: none;
+    }
+
+    .toggle-track {
+      width: 44px;
+      height: 24px;
+      background: #d1d5db;
+      border-radius: 12px;
+      position: relative;
+      transition: background 0.2s ease;
+      flex-shrink: 0;
+    }
+
+    .toggle-track::after {
+      content: '';
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 18px;
+      height: 18px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform 0.2s ease;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }
+
+    input[type="checkbox"]:checked + .toggle-track {
+      background: #C64E21;
+    }
+
+    input[type="checkbox"]:checked + .toggle-track::after {
+      transform: translateX(20px);
+    }
+
+    .toggle-text {
+      font-size: 15px;
+      font-weight: 500;
+      color: #333;
+    }
+
+    .status-row {
+      margin-top: 16px;
+      font-size: 13px;
+      color: #888;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .clear-btn {
+      font-size: 12px;
+      color: #C64E21;
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 0;
+      text-decoration: underline;
+    }
+
+    .clear-btn:hover {
+      color: #a03a18;
+    }
+
+    .saved-flash {
+      font-size: 13px;
+      color: #28a745;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      margin-top: 12px;
+      font-weight: 500;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>Settings</h1>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Auto-save conversations</span>
+      </div>
+      <p class="card-desc">
+        When enabled, each conversation is saved automatically once per day as soon as you open it.
+        Files download to your browser's default downloads folder — no need to click Export manually.
+      </p>
+
+      <label class="toggle-label">
+        <input type="checkbox" id="autoSaveToggle">
+        <span class="toggle-track"></span>
+        <span class="toggle-text" id="toggleText">Off</span>
+      </label>
+
+      <div class="status-row">
+        <span id="saveStatus">Loading…</span>
+        <button class="clear-btn" id="clearHistory">Clear history</button>
+      </div>
+
+      <div class="saved-flash" id="savedFlash">Settings saved</div>
+    </div>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

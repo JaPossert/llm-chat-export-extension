@@ -10,7 +10,29 @@
     "activeTab",
     "scripting",
     "downloads",
-    "offscreen"
+    "offscreen",
+    "storage"
+  ],
+
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "*://chat.openai.com/*",
+        "*://chatgpt.com/*",
+        "*://claude.ai/*",
+        "*://gemini.google.com/*",
+        "*://x.com/i/grok*",
+        "*://grok.com/c/*",
+        "*://lumo.proton.me/*"
+      ],
+      "js": ["autosave-check.js"],
+      "run_at": "document_idle"
+    }
   ],
 
   "host_permissions": [
