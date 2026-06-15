@@ -99,7 +99,8 @@ async function ensureExportScriptsInjected(tabId, platform) {
         chatgpt: 'chatGPT_extractor_injected',
         claude: 'claude_extractor_injected',
         gemini: 'gemini_extractor_injected',
-        grok: 'grok_extractor_injected'
+        grok: 'grok_extractor_injected',
+        lumo: 'lumo_extractor_injected'
     };
 
     const extractorMarker = markerByPlatform[platform];
@@ -222,7 +223,7 @@ async function ensureOffscreenDocument() {
 
 // SECURITY: Input validation functions
 function isValidPlatform(platform) {
-    const validPlatforms = ['chatgpt', 'claude', 'gemini', 'grok'];
+    const validPlatforms = ['chatgpt', 'claude', 'gemini', 'grok', 'lumo'];
     return typeof platform === 'string' && validPlatforms.includes(platform);
 }
 
@@ -248,7 +249,8 @@ function isValidUrl(url) {
             'claude.ai',
             'gemini.google.com',
             'x.com',
-            'grok.com'
+            'grok.com',
+            'lumo.proton.me'
         ];
 
         return allowedDomains.some(domain =>

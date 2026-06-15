@@ -47,6 +47,9 @@ class PopupController {
             grok: [
                 /^https?:\/\/x\.com\/i\/grok/,
                 /^https?:\/\/grok\.com\/c\//
+            ],
+            lumo: [
+                /^https?:\/\/lumo\.proton\.me/
             ]
         };
 
@@ -103,7 +106,8 @@ class PopupController {
             chatgpt: 'ChatGPT',
             claude: 'Claude',
             gemini: 'Gemini',
-            grok: 'Grok'
+            grok: 'Grok',
+            lumo: 'Lumo'
         };
 
         const displayName = platformNames[this.currentTab.platform] || 'Unknown Platform';

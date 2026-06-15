@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Local AI Chat Exporter",
-  "description": "Export ChatGPT, Claude, Gemini, and Grok conversations to plain text files.",
-  "version": "1.0.3",
+  "description": "Export ChatGPT, Claude, Gemini, Grok, and Lumo conversations to plain text files.",
+  "version": "1.0.4",
   "author": "Pantheon Network",
   "homepage_url": "https://github.com/panth-net/llm-chat-export-extension/",
 
@@ -19,7 +19,8 @@
     "*://claude.ai/*",
     "*://gemini.google.com/*",
     "*://x.com/i/grok*",
-    "*://grok.com/c/*"
+    "*://grok.com/c/*",
+    "*://lumo.proton.me/*"
   ],
 
   "background": {
