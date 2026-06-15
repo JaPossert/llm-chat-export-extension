@@ -1,5 +1,7 @@
 # LLM Conversation Exporter
 
+> **Status:** Working but not rigorously tested. Lumo support and the auto-save feature are new — use with that in mind and feel free to open an issue if something breaks.
+
 Export conversations from ChatGPT, Claude, Gemini, Grok, and **Lumo** to plain text files. All processing happens locally in your browser — nothing leaves your machine.
 
 ## Supported Platforms
